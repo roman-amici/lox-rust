@@ -36,7 +36,9 @@ fn run_prompt() {
         print!("> ");
         io::stdout().flush().unwrap();
         if let Ok(_) = io::stdin().read_line(&mut buffer) {
-            run(&buffer, &mut interpreter);
+            if buffer.len() > 1 {
+                run(&buffer, &mut interpreter);
+            }
         } else {
             return;
         }
@@ -49,8 +51,10 @@ fn run(source: &String, interpreter: &mut interpreter::VM) {
     let mut compiler = compiler::Compiler::new(tokens);
     match compiler.compile() {
         Ok(chunk) => {
-            if let Err(_) = interpreter.interpret(chunk) {
+            //println!("{:?}", chunk.code);
+            if let Err(e) = interpreter.interpret(chunk) {
                 println!("An error ocurred while interpreting");
+                println!("{}", e.to_string())
             }
         }
         Err(error) => println!("{}", error.to_string()),

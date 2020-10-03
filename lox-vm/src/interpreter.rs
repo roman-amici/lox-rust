@@ -1,9 +1,15 @@
 use super::chunk::*;
-use super::value::Value;
+use super::value::{FromValue, ToValue, Value};
 
 pub enum InterpreterError {
-    CompileError,
-    RuntimeError,
+    TypeError(usize, String),
+}
+
+impl InterpreterError {
+    pub fn to_string(&self) -> String {
+        let InterpreterError::TypeError(line, msg) = self;
+        format!("{}: {}", line, msg)
+    }
 }
 
 pub struct VM {
@@ -49,13 +55,38 @@ impl VM {
         self.stack.pop().unwrap()
     }
 
-    //TODO: Replace with macro
-    fn binary_op(&mut self, bop: fn(f64, f64) -> f64) -> Result<(), InterpreterError> {
-        let b = self.pop().as_number()?;
-        let a = self.pop().as_number()?;
-        let result = Value::Number(bop(a, b));
+    #[inline]
+    fn current_line(&self) -> usize {
+        //Since we've already advanced past it
+        self.chunk.line_numbers[self.ip - 1]
+    }
+
+    fn lox_bool_coercion(val: Value) -> bool {
+        match val {
+            Value::Boolean(b) => b,
+            Value::Nil => false,
+            _ => true,
+        }
+    }
+
+    fn binary_op<T1: FromValue, T2: FromValue, R: ToValue>(
+        &mut self,
+        bop: fn(T1, T2) -> R,
+    ) -> Result<(), InterpreterError> {
+        let b = T2::as_val(self.pop(), self.current_line())?;
+        let a = T1::as_val(self.pop(), self.current_line())?;
+        let result = R::to_value(bop(a, b));
         self.push(result);
         Ok(())
+    }
+
+    fn values_equal(a: Value, b: Value) -> bool {
+        match (a, b) {
+            (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
+            (Value::Number(na), Value::Number(nb)) => na == nb,
+            (Value::Nil, Value::Nil) => true,
+            _ => false,
+        }
     }
 
     fn run(&mut self) -> Result<(), InterpreterError> {
@@ -69,12 +100,15 @@ impl VM {
                     let val = self.read_constant(address);
                     self.push(val);
                 }
-                OpCode::Negate => {
-                    match self.pop() {
-                        Value::Number(n) => self.push(Value::Number(-n)),
-                        _ => return Err(InterpreterError::RuntimeError), //TODO: fill this in
+                OpCode::Negate => match self.pop() {
+                    Value::Number(n) => self.push(Value::Number(-n)),
+                    _ => {
+                        return Err(InterpreterError::TypeError(
+                            self.current_line(),
+                            String::from("Operand must be a number."),
+                        ))
                     }
-                }
+                },
                 OpCode::Add => {
                     self.binary_op(|a: f64, b: f64| a + b)?;
                 }
@@ -86,6 +120,27 @@ impl VM {
                 }
                 OpCode::Divide => {
                     self.binary_op(|a: f64, b: f64| a / b)?;
+                }
+                OpCode::Nil => {
+                    self.stack.push(Value::Nil);
+                }
+                OpCode::True => self.stack.push(Value::Boolean(true)),
+                OpCode::False => self.stack.push(Value::Boolean(false)),
+                OpCode::Not => {
+                    let b = VM::lox_bool_coercion(self.pop());
+                    self.stack.push(Value::Boolean(!b));
+                }
+                OpCode::Equal => {
+                    let b = self.pop();
+                    let a = self.pop();
+                    let result = VM::values_equal(a, b);
+                    self.stack.push(Value::Boolean(result));
+                }
+                OpCode::Greater => {
+                    self.binary_op(|a: f64, b: f64| a > b)?;
+                }
+                OpCode::Less => {
+                    self.binary_op(|a: f64, b: f64| a < b)?;
                 }
             }
         }

@@ -3,12 +3,19 @@ use super::value::Value;
 #[derive(Debug, Copy, Clone)]
 pub enum OpCode {
     Constant(usize), //Index into the constants array
+    Nil,
+    True,
+    False,
     Negate,
     Add,
     Subtract,
     Multiply,
     Divide,
     Return,
+    Not,
+    Equal,
+    Greater,
+    Less,
 }
 
 #[derive(Clone)]

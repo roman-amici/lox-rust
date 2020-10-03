@@ -3,7 +3,6 @@ use super::token::*;
 use super::value::*;
 
 use num_enum::TryFromPrimitive;
-use std::collections::BTreeMap;
 use std::convert::TryFrom;
 
 pub enum CompilerError {
@@ -110,6 +109,56 @@ impl Compiler {
                     infix: None,
                     precedence: Precedence::None,
                 }),
+                TokenType::False => rules.push(ParseRule {
+                    prefix: Some(Compiler::literal),
+                    infix: None,
+                    precedence: Precedence::None,
+                }),
+                TokenType::True => rules.push(ParseRule {
+                    prefix: Some(Compiler::literal),
+                    infix: None,
+                    precedence: Precedence::None,
+                }),
+                TokenType::Nil => rules.push(ParseRule {
+                    prefix: Some(Compiler::literal),
+                    infix: None,
+                    precedence: Precedence::None,
+                }),
+                TokenType::Bang => rules.push(ParseRule {
+                    prefix: Some(Compiler::unary),
+                    infix: None,
+                    precedence: Precedence::None,
+                }),
+                TokenType::EqualEqual => rules.push(ParseRule {
+                    prefix: None,
+                    infix: Some(Compiler::binary),
+                    precedence: Precedence::Equality,
+                }),
+                TokenType::BangEqual => rules.push(ParseRule {
+                    prefix: None,
+                    infix: Some(Compiler::binary),
+                    precedence: Precedence::Equality,
+                }),
+                TokenType::Greater => rules.push(ParseRule {
+                    prefix: None,
+                    infix: Some(Compiler::binary),
+                    precedence: Precedence::Comparison,
+                }),
+                TokenType::GreaterEqual => rules.push(ParseRule {
+                    prefix: None,
+                    infix: Some(Compiler::binary),
+                    precedence: Precedence::Comparison,
+                }),
+                TokenType::Less => rules.push(ParseRule {
+                    prefix: None,
+                    infix: Some(Compiler::binary),
+                    precedence: Precedence::Comparison,
+                }),
+                TokenType::LessEqual => rules.push(ParseRule {
+                    prefix: None,
+                    infix: Some(Compiler::binary),
+                    precedence: Precedence::Comparison,
+                }),
                 _ => rules.push(ParseRule {
                     prefix: None,
                     infix: None,
@@ -199,6 +248,24 @@ impl Compiler {
         self.emit_constant(Value::Number(number), token.line)
     }
 
+    fn literal(&mut self) -> Result<(), CompilerError> {
+        let token = self.previous();
+
+        match token.token_type {
+            TokenType::False => self.chunk.append_chunk(OpCode::False, token.line),
+            TokenType::True => self.chunk.append_chunk(OpCode::True, token.line),
+            TokenType::Nil => self.chunk.append_chunk(OpCode::Nil, token.line),
+            _ => {
+                return Err(CompilerError::SyntaxError(
+                    String::from("Expected literal"),
+                    token.line,
+                ))
+            }
+        }
+
+        Ok(())
+    }
+
     fn parse_precedence(&mut self, precedence: Precedence) -> Result<(), CompilerError> {
         let (token_type, line) = {
             let token = self.advance();
@@ -262,6 +329,21 @@ impl Compiler {
             TokenType::Minus => self.chunk.append_chunk(OpCode::Subtract, line),
             TokenType::Star => self.chunk.append_chunk(OpCode::Multiply, line),
             TokenType::Slash => self.chunk.append_chunk(OpCode::Divide, line),
+            TokenType::EqualEqual => self.chunk.append_chunk(OpCode::Equal, line),
+            TokenType::BangEqual => {
+                self.chunk.append_chunk(OpCode::Equal, line);
+                self.chunk.append_chunk(OpCode::Not, line);
+            }
+            TokenType::Greater => self.chunk.append_chunk(OpCode::Greater, line),
+            TokenType::GreaterEqual => {
+                self.chunk.append_chunk(OpCode::Less, line);
+                self.chunk.append_chunk(OpCode::Not, line);
+            }
+            TokenType::Less => self.chunk.append_chunk(OpCode::Less, line),
+            TokenType::LessEqual => {
+                self.chunk.append_chunk(OpCode::Greater, line);
+                self.chunk.append_chunk(OpCode::Not, line);
+            }
             _ => unimplemented!(),
         };
 
@@ -278,6 +360,7 @@ impl Compiler {
 
         match token_type {
             TokenType::Minus => self.chunk.append_chunk(OpCode::Negate, line),
+            TokenType::Bang => self.chunk.append_chunk(OpCode::Not, line),
             _ => unimplemented!(),
         }
 
