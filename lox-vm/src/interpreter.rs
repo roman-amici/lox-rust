@@ -1,15 +1,22 @@
 use super::chunk::*;
-use super::value::{FromValue, Object, ToValue, Value};
+use super::value::{FromValue, FromValueRef, Object, ToValue, Value};
+use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
+use std::hash::{Hash, Hasher};
+use std::mem::swap;
 
 pub enum InterpreterError {
     TypeError(usize, String),
+    NameError(usize, String),
 }
 
 impl InterpreterError {
     pub fn to_string(&self) -> String {
-        let InterpreterError::TypeError(line, msg) = self;
-        format!("{}: {}", line, msg)
+        match self {
+            InterpreterError::TypeError(line, msg) | InterpreterError::NameError(line, msg) => {
+                format!("{}: {}", line, msg)
+            }
+        }
     }
 }
 
@@ -18,6 +25,8 @@ pub struct VM {
     ip: usize,    // Instruction pointer
     stack: Vec<Value>,
     heap: HashMap<usize, Object>,
+    globals: HashMap<u64, Value>,
+    strings: HashMap<u64, String>,
 }
 
 impl VM {
@@ -27,20 +36,45 @@ impl VM {
             ip: 0,
             stack: vec![],
             heap: HashMap::new(),
+            globals: HashMap::new(),
+            strings: HashMap::new(),
         }
+    }
+
+    pub fn add_new_string(&mut self, s: String) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        s.hash(&mut hasher);
+        let hash_val = hasher.finish();
+        if self.strings.contains_key(&hash_val) && self.strings[&hash_val] != s {
+            panic!("Hash collision!");
+        } else {
+            self.strings.insert(hash_val, s);
+        }
+
+        hash_val
     }
 
     pub fn interpret(&mut self, chunk: Chunk) -> Result<(), InterpreterError> {
         self.chunk = chunk;
+        let mut new_strings: Vec<String> = vec![];
+        swap(&mut self.chunk.new_strings, &mut new_strings);
+        for s in new_strings {
+            self.add_new_string(s);
+        }
+
         self.ip = 0;
         self.run()
     }
 
     #[inline]
     fn consume(&mut self) -> OpCode {
-        let op = self.chunk.code[self.ip];
-        self.ip += 1;
-        op
+        if self.ip < self.chunk.code.len() {
+            let op = self.chunk.code[self.ip];
+            self.ip += 1;
+            op
+        } else {
+            OpCode::EOF
+        }
     }
 
     fn read_constant(&self, address: usize) -> Value {
@@ -82,11 +116,34 @@ impl VM {
         Ok(())
     }
 
+    fn deref_str_ptr(&self, value: Value) -> Result<&String, InterpreterError> {
+        match value {
+            Value::StrPtr(p) => Ok(self.get_string(p)),
+            _ => Err(InterpreterError::TypeError(
+                0,
+                String::from("Impossible Error: Expected String"),
+            )),
+        }
+    }
+
+    fn string_concat(&mut self) -> Result<(), InterpreterError> {
+        let b = self.pop();
+        let a = self.pop();
+        let s_a = self.deref_str_ptr(a)?;
+        let s_b = self.deref_str_ptr(b)?;
+
+        let s_c = format!("{}{}", s_a, s_b);
+        let p = self.add_new_string(s_c);
+        self.stack.push(Value::StrPtr(p));
+        Ok(())
+    }
+
     fn values_equal(&self, a: Value, b: Value) -> bool {
         match (a, b) {
             (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
             (Value::Number(na), Value::Number(nb)) => na == nb,
             (Value::Nil, Value::Nil) => true,
+            (Value::StrPtr(p_a), Value::StrPtr(p_b)) => p_a == p_b,
             (Value::Object(p_a), Value::Object(p_b)) => {
                 let v_a = self.follow(p_a);
                 let v_b = self.follow(p_b);
@@ -99,12 +156,17 @@ impl VM {
         }
     }
 
+    fn get_string(&self, p: u64) -> &String {
+        &self.strings[&p]
+    }
+
     fn print(&self, value: Value) {
         match value {
             Value::Number(n) => println!("{} : Number", n),
             Value::Boolean(b) => println!("{} : Boolean", b),
             Value::Object(p) => println!("{:?} : Object", self.heap[&p]),
             Value::Nil => println!("nil : Nil"),
+            Value::StrPtr(p) => println!("{}", self.get_string(p)),
         }
     }
 
@@ -129,41 +191,25 @@ impl VM {
         new_address
     }
 
-    fn concat_string(&mut self) -> Result<(), InterpreterError> {
-        let b = self.pop();
-        let a = self.pop();
-        let obj_a = self.deref(&a);
-        let obj_b = self.deref(&b);
-
-        match (obj_a, obj_b) {
-            (Some(Object::String(s_a)), Some(Object::String(s_b))) => {
-                let s_new = format!("{}{}", s_a, s_b);
-                let address = self.add_to_heap(Object::String(s_new));
-                self.stack.push(Value::Object(address));
-            }
-            _ => panic!("Unreachable string concat"),
-        }
-
-        Ok(())
-    }
-
     fn run(&mut self) -> Result<(), InterpreterError> {
         loop {
             match self.consume() {
+                OpCode::EOF => return Ok(()),
                 OpCode::Return => {
                     let value = self.pop();
                     self.print(value);
                     return Ok(());
                 }
+                OpCode::Print => {
+                    let value = self.pop();
+                    self.print(value);
+                }
+                OpCode::Pop => {
+                    self.pop();
+                }
                 OpCode::Constant(address) => {
                     let val = self.read_constant(address);
                     self.push(val);
-                }
-                OpCode::Hoist => {
-                    //Lifo order to match the order the op codes were added.
-                    let object = self.chunk.heap_hoist.remove(0);
-                    let address = self.add_to_heap(object);
-                    self.stack.push(Value::Object(address))
                 }
                 OpCode::Negate => match self.pop() {
                     Value::Number(n) => self.push(Value::Number(-n)),
@@ -175,11 +221,11 @@ impl VM {
                     }
                 },
                 OpCode::Add => {
-                    let obj_1 = self.deref(self.peek(0));
-                    let obj_2 = self.deref(self.peek(1));
-                    match (obj_1, obj_2) {
-                        (Some(Object::String(_)), Some(Object::String(_))) => {
-                            self.concat_string()?
+                    let a = self.peek(0);
+                    let b = self.peek(1);
+                    match (a, b) {
+                        (Value::StrPtr(_), Value::StrPtr(_)) => {
+                            self.string_concat()?;
                         }
                         _ => self.binary_op(|a: f64, b: f64| a + b)?,
                     };
@@ -213,6 +259,21 @@ impl VM {
                 }
                 OpCode::Less => {
                     self.binary_op(|a: f64, b: f64| a < b)?;
+                }
+                OpCode::DefineGlobal(name_ptr) => {
+                    let value = self.pop();
+                    self.globals.insert(name_ptr, value);
+                }
+                OpCode::GetGlobal(name_ptr) => {
+                    if !self.globals.contains_key(&name_ptr) {
+                        return Err(InterpreterError::NameError(
+                            0,
+                            format!("Undefined variable {}", self.get_string(name_ptr)),
+                        ));
+                    } else {
+                        let value = self.globals[&name_ptr];
+                        self.push(value);
+                    }
                 }
             }
         }

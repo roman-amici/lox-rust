@@ -1,9 +1,11 @@
 use super::value::{Object, Value};
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Copy, Clone)]
 pub enum OpCode {
     Constant(usize), //Index into the constants array
-    Hoist,
+    DefineGlobal(u64),
     Nil,
     True,
     False,
@@ -13,10 +15,14 @@ pub enum OpCode {
     Multiply,
     Divide,
     Return,
+    Print,
+    Pop,
     Not,
     Equal,
     Greater,
     Less,
+    GetGlobal(u64),
+    EOF,
 }
 
 #[derive(Clone)]
@@ -24,7 +30,7 @@ pub struct Chunk {
     pub code: Vec<OpCode>,
     pub constants: Vec<Value>,
     pub line_numbers: Vec<usize>,
-    pub heap_hoist: Vec<Object>,
+    pub new_strings: Vec<String>,
 }
 
 impl Chunk {
@@ -33,7 +39,7 @@ impl Chunk {
             code: vec![],
             constants: vec![],
             line_numbers: vec![],
-            heap_hoist: vec![],
+            new_strings: vec![],
         }
     }
 
@@ -45,5 +51,13 @@ impl Chunk {
     pub fn append_chunk(&mut self, op: OpCode, line: usize) {
         self.code.push(op);
         self.line_numbers.push(line);
+    }
+
+    pub fn add_string(&mut self, s: String) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        s.hash(&mut hasher);
+        let hash_val = hasher.finish();
+        self.new_strings.push(s);
+        hash_val
     }
 }

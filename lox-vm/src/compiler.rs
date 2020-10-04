@@ -30,6 +30,7 @@ pub struct Compiler {
     current: usize,
     chunk: Chunk,
     rules: Vec<ParseRule>,
+    has_error: bool,
 }
 
 #[derive(PartialOrd, PartialEq, Ord, Eq, Copy, Clone, TryFromPrimitive)]
@@ -67,6 +68,7 @@ impl Compiler {
             current: 0,
             chunk: Chunk::new(),
             rules: Compiler::build_parse_rules(),
+            has_error: false,
         }
     }
 
@@ -164,6 +166,11 @@ impl Compiler {
                     infix: None,
                     precedence: Precedence::None,
                 }),
+                TokenType::Identifier => rules.push(ParseRule {
+                    prefix: Some(Compiler::variable),
+                    infix: None,
+                    precedence: Precedence::None,
+                }),
                 _ => rules.push(ParseRule {
                     prefix: None,
                     infix: None,
@@ -244,26 +251,42 @@ impl Compiler {
         Ok(())
     }
 
+    fn variable(&mut self) -> Result<(), CompilerError> {
+        let (line, name) = {
+            let token = self.previous();
+            let name = token.literal.as_ref().unwrap().clone();
+            (token.line, name)
+        };
+
+        let hash_value = self.chunk.add_string(name);
+
+        self.chunk.append_chunk(OpCode::GetGlobal(hash_value), line);
+        Ok(())
+    }
+
     fn number(&mut self) -> Result<(), CompilerError> {
         let token = self.previous();
         assert_eq!(token.token_type, TokenType::NumberToken);
 
         let number: f64 = token.literal.as_ref().unwrap().parse().unwrap();
+        let line = token.line;
 
-        self.emit_constant(Value::Number(number), token.line)
+        self.emit_constant(Value::Number(number), line)
     }
 
     fn literal(&mut self) -> Result<(), CompilerError> {
-        let token = self.previous();
-
-        match token.token_type {
-            TokenType::False => self.chunk.append_chunk(OpCode::False, token.line),
-            TokenType::True => self.chunk.append_chunk(OpCode::True, token.line),
-            TokenType::Nil => self.chunk.append_chunk(OpCode::Nil, token.line),
+        let (token_type, line) = {
+            let token = self.previous();
+            (token.token_type, token.line)
+        };
+        match token_type {
+            TokenType::False => self.chunk.append_chunk(OpCode::False, line),
+            TokenType::True => self.chunk.append_chunk(OpCode::True, line),
+            TokenType::Nil => self.chunk.append_chunk(OpCode::Nil, line),
             _ => {
                 return Err(CompilerError::SyntaxError(
                     String::from("Expected literal"),
-                    token.line,
+                    line,
                 ))
             }
         }
@@ -362,8 +385,9 @@ impl Compiler {
             let str_value = token.literal.as_ref().unwrap().clone();
             (str_value, token.line)
         };
-        self.chunk.heap_hoist.push(Object::String(str_value));
-        self.chunk.append_chunk(OpCode::Hoist, line);
+        let hash_value = self.chunk.add_string(str_value);
+        let const_idx = self.chunk.add_constant(Value::StrPtr(hash_value));
+        self.chunk.append_chunk(OpCode::Constant(const_idx), line);
         Ok(())
     }
 
@@ -384,9 +408,114 @@ impl Compiler {
         Ok(())
     }
 
-    pub fn compile(&mut self) -> Result<Chunk, CompilerError> {
+    fn print_statement(&mut self) -> Result<(), CompilerError> {
         self.expression()?;
-        self.chunk.append_chunk(OpCode::Return, 0);
-        Ok(self.chunk.clone())
+        let line = self
+            .try_consume(TokenType::Semicolon, "Expected ';' after expression")?
+            .line;
+
+        self.chunk.append_chunk(OpCode::Print, line);
+
+        Ok(())
+    }
+
+    fn expression_statement(&mut self) -> Result<(), CompilerError> {
+        self.expression()?;
+        let line = self
+            .try_consume(TokenType::Semicolon, "Expected ';' after expression")?
+            .line;
+
+        self.chunk.append_chunk(OpCode::Pop, line);
+
+        Ok(())
+    }
+
+    fn statement(&mut self) -> Result<(), CompilerError> {
+        if self.match_token(TokenType::Print) {
+            self.print_statement()
+        } else {
+            self.expression_statement()
+        }
+    }
+
+    fn parse_variable(&mut self, error_msg: &str) -> Result<u64, CompilerError> {
+        let token = self.try_consume(TokenType::Identifier, error_msg)?;
+        let name = token.literal.unwrap().clone();
+
+        Ok(self.chunk.add_string(name))
+    }
+
+    fn var_declaration(&mut self) -> Result<(), CompilerError> {
+        let name_hash = self.parse_variable("Expected variable name.")?;
+        let line = self.previous().line;
+
+        if self.match_token(TokenType::Equal) {
+            self.expression()?;
+        } else {
+            self.chunk.append_chunk(OpCode::Nil, line);
+        }
+
+        self.try_consume(
+            TokenType::Semicolon,
+            "Expected ';' after variable declaration",
+        )?;
+
+        self.chunk
+            .append_chunk(OpCode::DefineGlobal(name_hash), line);
+        Ok(())
+    }
+
+    fn declaration(&mut self) -> Result<(), CompilerError> {
+        if self.match_token(TokenType::Var) {
+            self.var_declaration()
+        } else {
+            self.statement()
+        }
+    }
+
+    fn synchronize(&mut self) {
+        while !self.is_at_end() {
+            if self.previous().token_type == TokenType::Semicolon {
+                return;
+            } else {
+                match self.peek().token_type {
+                    TokenType::Class
+                    | TokenType::Fun
+                    | TokenType::Var
+                    | TokenType::For
+                    | TokenType::If
+                    | TokenType::While
+                    | TokenType::Print
+                    | TokenType::Return => return,
+                    _ => {
+                        self.advance();
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn compile(&mut self) -> Result<Chunk, ()> {
+        let mut old_idx = self.current;
+        while !self.is_at_end() {
+            let result = self.declaration();
+            if let Err(e) = result {
+                self.has_error = true;
+                println!("Compiler error: {}", e.to_string());
+                self.synchronize();
+            };
+
+            if self.current == old_idx {
+                println!("Error: Infinite loop");
+                return Err(());
+            }
+
+            old_idx = self.current;
+        }
+        if self.has_error {
+            Err(())
+        } else {
+            Ok(self.chunk.clone())
+        }
     }
 }

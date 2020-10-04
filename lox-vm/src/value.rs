@@ -1,10 +1,11 @@
 use super::interpreter::InterpreterError;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Copy, Clone)]
 pub enum Value {
     Number(f64),
     Boolean(bool),
     Object(usize),
+    StrPtr(u64),
     Nil,
 }
 
@@ -19,6 +20,10 @@ where
     Self: Sized,
 {
     fn as_val(val: Value, line: usize) -> Result<Self, InterpreterError>;
+}
+
+pub trait FromValueRef {
+    fn as_val_ref(val: &Value, line: usize) -> Result<&Self, InterpreterError>;
 }
 
 impl FromValue for f64 {

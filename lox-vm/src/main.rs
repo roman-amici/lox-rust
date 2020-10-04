@@ -49,14 +49,11 @@ fn run_prompt() {
 fn run(source: &String, interpreter: &mut interpreter::VM) {
     let tokens = scanner::scan_tokens(source).unwrap();
     let mut compiler = compiler::Compiler::new(tokens);
-    match compiler.compile() {
-        Ok(chunk) => {
-            println!("{:?}", chunk.code);
-            if let Err(e) = interpreter.interpret(chunk) {
-                println!("An error ocurred while interpreting");
-                println!("{}", e.to_string())
-            }
+    if let Ok(chunk) = compiler.compile() {
+        println!("{:?}", chunk.code);
+        if let Err(e) = interpreter.interpret(chunk) {
+            println!("An error ocurred while interpreting");
+            println!("Runtime Error: {}", e.to_string())
         }
-        Err(error) => println!("{}", error.to_string()),
     };
 }
