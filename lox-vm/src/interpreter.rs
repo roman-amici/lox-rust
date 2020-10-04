@@ -87,6 +87,14 @@ impl VM {
             (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
             (Value::Number(na), Value::Number(nb)) => na == nb,
             (Value::Nil, Value::Nil) => true,
+            (Value::Object(p_a), Value::Object(p_b)) => {
+                let v_a = self.follow(p_a);
+                let v_b = self.follow(p_b);
+                match (v_a, v_b) {
+                    (Object::String(s1), Object::String(s2)) => s1 == s2,
+                    _ => false,
+                }
+            }
             _ => false,
         }
     }
@@ -102,6 +110,10 @@ impl VM {
 
     fn peek(&self, look_back: usize) -> &Value {
         &self.stack[self.stack.len() - 1 - look_back]
+    }
+
+    fn follow(&self, pointer: usize) -> &Object {
+        &self.heap[&pointer]
     }
 
     fn deref(&self, value: &Value) -> Option<&Object> {
