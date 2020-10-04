@@ -267,12 +267,23 @@ impl VM {
                 OpCode::GetGlobal(name_ptr) => {
                     if !self.globals.contains_key(&name_ptr) {
                         return Err(InterpreterError::NameError(
-                            0,
+                            self.current_line(),
                             format!("Undefined variable {}", self.get_string(name_ptr)),
                         ));
                     } else {
                         let value = self.globals[&name_ptr];
                         self.push(value);
+                    }
+                }
+                OpCode::SetGlobal(name_ptr) => {
+                    if !self.globals.contains_key(&name_ptr) {
+                        return Err(InterpreterError::NameError(
+                            self.current_line(),
+                            format!("Undefined variable {}", self.get_string(name_ptr)),
+                        ));
+                    } else {
+                        let value = *self.peek(0);
+                        self.globals.insert(name_ptr, value);
                     }
                 }
             }

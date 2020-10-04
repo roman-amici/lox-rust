@@ -20,8 +20,8 @@ impl CompilerError {
 
 #[derive(Copy, Clone)]
 struct ParseRule {
-    prefix: Option<fn(&mut Compiler) -> Result<(), CompilerError>>,
-    infix: Option<fn(&mut Compiler) -> Result<(), CompilerError>>,
+    prefix: Option<fn(&mut Compiler, bool) -> Result<(), CompilerError>>,
+    infix: Option<fn(&mut Compiler, bool) -> Result<(), CompilerError>>,
     precedence: Precedence,
 }
 
@@ -251,20 +251,24 @@ impl Compiler {
         Ok(())
     }
 
-    fn variable(&mut self) -> Result<(), CompilerError> {
+    fn variable(&mut self, can_assign: bool) -> Result<(), CompilerError> {
         let (line, name) = {
             let token = self.previous();
             let name = token.literal.as_ref().unwrap().clone();
             (token.line, name)
         };
-
         let hash_value = self.chunk.add_string(name);
 
-        self.chunk.append_chunk(OpCode::GetGlobal(hash_value), line);
+        if can_assign && self.match_token(TokenType::Equal) {
+            self.expression()?;
+            self.chunk.append_chunk(OpCode::SetGlobal(hash_value), line);
+        } else {
+            self.chunk.append_chunk(OpCode::GetGlobal(hash_value), line);
+        }
         Ok(())
     }
 
-    fn number(&mut self) -> Result<(), CompilerError> {
+    fn number(&mut self, can_assign: bool) -> Result<(), CompilerError> {
         let token = self.previous();
         assert_eq!(token.token_type, TokenType::NumberToken);
 
@@ -274,7 +278,7 @@ impl Compiler {
         self.emit_constant(Value::Number(number), line)
     }
 
-    fn literal(&mut self) -> Result<(), CompilerError> {
+    fn literal(&mut self, can_assign: bool) -> Result<(), CompilerError> {
         let (token_type, line) = {
             let token = self.previous();
             (token.token_type, token.line)
@@ -300,7 +304,8 @@ impl Compiler {
             (token.token_type, token.line)
         };
         if let Some(prefix_fn) = self.get_rule(token_type).prefix {
-            prefix_fn(self)?; // Calls as a method
+            let can_assign = precedence <= Precedence::Assignment;
+            prefix_fn(self, can_assign)?; // Calls as a method
         } else {
             return Err(CompilerError::SyntaxError(
                 String::from("Expected expression."),
@@ -314,7 +319,8 @@ impl Compiler {
                 (token.token_type, token.line)
             };
             if let Some(infix_fn) = self.get_rule(token_type).infix {
-                infix_fn(self)?;
+                let can_assign = precedence <= Precedence::Assignment;
+                infix_fn(self, can_assign)?;
             } else {
                 return Err(CompilerError::SyntaxError(
                     String::from("Expected expression."),
@@ -330,7 +336,7 @@ impl Compiler {
         self.parse_precedence(Precedence::Assignment)
     }
 
-    fn grouping(&mut self) -> Result<(), CompilerError> {
+    fn grouping(&mut self, can_assign: bool) -> Result<(), CompilerError> {
         self.expression()?;
         self.try_consume(TokenType::RightParen, "Expected ')' after expression")?;
         Ok(())
@@ -341,7 +347,7 @@ impl Compiler {
         &self.rules[rule_idx]
     }
 
-    fn binary(&mut self) -> Result<(), CompilerError> {
+    fn binary(&mut self, can_assign: bool) -> Result<(), CompilerError> {
         let (token_type, line) = {
             let operator = self.previous();
             (operator.token_type, operator.line)
@@ -378,7 +384,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn string(&mut self) -> Result<(), CompilerError> {
+    fn string(&mut self, can_assign: bool) -> Result<(), CompilerError> {
         let (str_value, line) = {
             let token = self.previous();
             assert_eq!(token.token_type, TokenType::StringToken);
@@ -391,7 +397,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn unary(&mut self) -> Result<(), CompilerError> {
+    fn unary(&mut self, can_assign: bool) -> Result<(), CompilerError> {
         let (token_type, line) = {
             let operator = self.previous();
             (operator.token_type, operator.line)

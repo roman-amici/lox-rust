@@ -22,6 +22,7 @@ pub enum OpCode {
     Greater,
     Less,
     GetGlobal(u64),
+    SetGlobal(u64),
     EOF,
 }
 
