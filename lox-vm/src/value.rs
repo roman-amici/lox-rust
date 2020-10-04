@@ -1,10 +1,17 @@
 use super::interpreter::InterpreterError;
 
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Clone)]
 pub enum Value {
     Number(f64),
     Boolean(bool),
+    Object(usize),
     Nil,
+}
+
+//Consider changing to a struct
+#[derive(Debug, Clone)]
+pub enum Object {
+    String(String),
 }
 
 pub trait FromValue

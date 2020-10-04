@@ -159,6 +159,11 @@ impl Compiler {
                     infix: Some(Compiler::binary),
                     precedence: Precedence::Comparison,
                 }),
+                TokenType::StringToken => rules.push(ParseRule {
+                    prefix: Some(Compiler::string),
+                    infix: None,
+                    precedence: Precedence::None,
+                }),
                 _ => rules.push(ParseRule {
                     prefix: None,
                     infix: None,
@@ -347,6 +352,18 @@ impl Compiler {
             _ => unimplemented!(),
         };
 
+        Ok(())
+    }
+
+    fn string(&mut self) -> Result<(), CompilerError> {
+        let (str_value, line) = {
+            let token = self.previous();
+            assert_eq!(token.token_type, TokenType::StringToken);
+            let str_value = token.literal.as_ref().unwrap().clone();
+            (str_value, token.line)
+        };
+        self.chunk.heap_hoist.push(Object::String(str_value));
+        self.chunk.append_chunk(OpCode::Hoist, line);
         Ok(())
     }
 

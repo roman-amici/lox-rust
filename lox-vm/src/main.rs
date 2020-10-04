@@ -51,7 +51,7 @@ fn run(source: &String, interpreter: &mut interpreter::VM) {
     let mut compiler = compiler::Compiler::new(tokens);
     match compiler.compile() {
         Ok(chunk) => {
-            //println!("{:?}", chunk.code);
+            println!("{:?}", chunk.code);
             if let Err(e) = interpreter.interpret(chunk) {
                 println!("An error ocurred while interpreting");
                 println!("{}", e.to_string())

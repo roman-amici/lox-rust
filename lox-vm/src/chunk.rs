@@ -1,8 +1,9 @@
-use super::value::Value;
+use super::value::{Object, Value};
 
 #[derive(Debug, Copy, Clone)]
 pub enum OpCode {
     Constant(usize), //Index into the constants array
+    Hoist,
     Nil,
     True,
     False,
@@ -23,6 +24,7 @@ pub struct Chunk {
     pub code: Vec<OpCode>,
     pub constants: Vec<Value>,
     pub line_numbers: Vec<usize>,
+    pub heap_hoist: Vec<Object>,
 }
 
 impl Chunk {
@@ -31,6 +33,7 @@ impl Chunk {
             code: vec![],
             constants: vec![],
             line_numbers: vec![],
+            heap_hoist: vec![],
         }
     }
 
