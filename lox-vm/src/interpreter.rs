@@ -286,6 +286,12 @@ impl VM {
                         self.globals.insert(name_ptr, value);
                     }
                 }
+                OpCode::GetLocal(slot) => {
+                    self.push(self.stack[slot]);
+                }
+                OpCode::SetLocal(slot) => {
+                    self.stack[slot] = self.peek(0).clone();
+                }
             }
         }
     }

@@ -23,6 +23,8 @@ pub enum OpCode {
     Less,
     GetGlobal(u64),
     SetGlobal(u64),
+    SetLocal(usize),
+    GetLocal(usize),
     EOF,
 }
 

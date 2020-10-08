@@ -25,14 +25,6 @@ struct ParseRule {
     precedence: Precedence,
 }
 
-pub struct Compiler {
-    tokens: Vec<Token>,
-    current: usize,
-    chunk: Chunk,
-    rules: Vec<ParseRule>,
-    has_error: bool,
-}
-
 #[derive(PartialOrd, PartialEq, Ord, Eq, Copy, Clone, TryFromPrimitive)]
 #[repr(usize)]
 enum Precedence {
@@ -61,6 +53,22 @@ impl Precedence {
     }
 }
 
+struct Local {
+    pub name: Token,
+    pub depth: usize,
+    pub initialized: bool,
+}
+
+pub struct Compiler {
+    tokens: Vec<Token>,
+    current: usize,
+    chunk: Chunk,
+    rules: Vec<ParseRule>,
+    has_error: bool,
+    locals: Vec<Local>,
+    scope_depth: usize,
+}
+
 impl Compiler {
     pub fn new(tokens: Vec<Token>) -> Compiler {
         Compiler {
@@ -69,6 +77,8 @@ impl Compiler {
             chunk: Chunk::new(),
             rules: Compiler::build_parse_rules(),
             has_error: false,
+            locals: vec![],
+            scope_depth: 0,
         }
     }
 
@@ -251,24 +261,53 @@ impl Compiler {
         Ok(())
     }
 
+    fn resolve_local(
+        &self,
+        var_name: &String,
+        line: usize,
+    ) -> Result<Option<usize>, CompilerError> {
+        let mut idx = self.locals.len() - 1;
+        for local in self.locals.iter().rev() {
+            if local.name.lexeme == *var_name {
+                if local.initialized {
+                    return Ok(Some(idx));
+                } else {
+                    return Err(CompilerError::SyntaxError(
+                        String::from("Can't read local variable in its own initializer."),
+                        line,
+                    ));
+                }
+                idx -= 1;
+            }
+        }
+
+        Ok(None)
+    }
+
     fn variable(&mut self, can_assign: bool) -> Result<(), CompilerError> {
         let (line, name) = {
             let token = self.previous();
             let name = token.literal.as_ref().unwrap().clone();
             (token.line, name)
         };
-        let hash_value = self.chunk.add_string(name);
+
+        let (set_op, get_op) = if let Some(id) = self.resolve_local(&name, line)? {
+            (OpCode::SetLocal(id), OpCode::GetLocal(id))
+        } else {
+            let hash_value = self.chunk.add_string(name);
+            (OpCode::SetGlobal(hash_value), OpCode::GetGlobal(hash_value))
+        };
 
         if can_assign && self.match_token(TokenType::Equal) {
             self.expression()?;
-            self.chunk.append_chunk(OpCode::SetGlobal(hash_value), line);
+            self.chunk.append_chunk(set_op, line);
         } else {
-            self.chunk.append_chunk(OpCode::GetGlobal(hash_value), line);
+            self.chunk.append_chunk(get_op, line);
         }
         Ok(())
     }
 
-    fn number(&mut self, can_assign: bool) -> Result<(), CompilerError> {
+    fn number(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
         let token = self.previous();
         assert_eq!(token.token_type, TokenType::NumberToken);
 
@@ -278,7 +317,7 @@ impl Compiler {
         self.emit_constant(Value::Number(number), line)
     }
 
-    fn literal(&mut self, can_assign: bool) -> Result<(), CompilerError> {
+    fn literal(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
         let (token_type, line) = {
             let token = self.previous();
             (token.token_type, token.line)
@@ -336,7 +375,7 @@ impl Compiler {
         self.parse_precedence(Precedence::Assignment)
     }
 
-    fn grouping(&mut self, can_assign: bool) -> Result<(), CompilerError> {
+    fn grouping(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
         self.expression()?;
         self.try_consume(TokenType::RightParen, "Expected ')' after expression")?;
         Ok(())
@@ -347,7 +386,7 @@ impl Compiler {
         &self.rules[rule_idx]
     }
 
-    fn binary(&mut self, can_assign: bool) -> Result<(), CompilerError> {
+    fn binary(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
         let (token_type, line) = {
             let operator = self.previous();
             (operator.token_type, operator.line)
@@ -384,7 +423,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn string(&mut self, can_assign: bool) -> Result<(), CompilerError> {
+    fn string(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
         let (str_value, line) = {
             let token = self.previous();
             assert_eq!(token.token_type, TokenType::StringToken);
@@ -397,7 +436,7 @@ impl Compiler {
         Ok(())
     }
 
-    fn unary(&mut self, can_assign: bool) -> Result<(), CompilerError> {
+    fn unary(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
         let (token_type, line) = {
             let operator = self.previous();
             (operator.token_type, operator.line)
@@ -436,9 +475,40 @@ impl Compiler {
         Ok(())
     }
 
+    fn begin_scope(&mut self) {
+        self.scope_depth += 1;
+    }
+
+    fn end_scope(&mut self) {
+        self.scope_depth -= 1;
+        while {
+            match self.locals.last() {
+                Some(local) => local.depth > self.scope_depth, //Since we just decremented the depth
+                None => false,
+            }
+        } {
+            let local = self.locals.pop().unwrap();
+            self.chunk.append_chunk(OpCode::Pop, local.name.line);
+        }
+    }
+
+    fn block(&mut self) -> Result<(), CompilerError> {
+        while !self.check_token(TokenType::RightBrace) && !self.check_token(TokenType::EOF) {
+            self.declaration()?;
+        }
+
+        self.try_consume(TokenType::RightBrace, "Expected '}' after block.")?;
+        Ok(())
+    }
+
     fn statement(&mut self) -> Result<(), CompilerError> {
         if self.match_token(TokenType::Print) {
             self.print_statement()
+        } else if self.match_token(TokenType::LeftBrace) {
+            self.begin_scope();
+            self.block()?;
+            self.end_scope();
+            Ok(())
         } else {
             self.expression_statement()
         }
@@ -446,9 +516,20 @@ impl Compiler {
 
     fn parse_variable(&mut self, error_msg: &str) -> Result<u64, CompilerError> {
         let token = self.try_consume(TokenType::Identifier, error_msg)?;
-        let name = token.literal.unwrap().clone();
 
-        Ok(self.chunk.add_string(name))
+        if self.scope_depth > 0 {
+            self.locals.push(Local {
+                name: token.clone(),
+                depth: self.scope_depth,
+                initialized: false,
+            });
+            //I think shadowing is fine, so we won't look for duplicate id's
+
+            Ok(0) //Us a dummy address
+        } else {
+            let name = token.literal.unwrap().clone();
+            Ok(self.chunk.add_string(name))
+        }
     }
 
     fn var_declaration(&mut self) -> Result<(), CompilerError> {
@@ -466,8 +547,13 @@ impl Compiler {
             "Expected ';' after variable declaration",
         )?;
 
-        self.chunk
-            .append_chunk(OpCode::DefineGlobal(name_hash), line);
+        if self.scope_depth == 0 {
+            //Only define globals at scope depth
+            self.chunk
+                .append_chunk(OpCode::DefineGlobal(name_hash), line);
+        } else {
+            self.locals.last_mut().unwrap().initialized = true;
+        }
         Ok(())
     }
 
