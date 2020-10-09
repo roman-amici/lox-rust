@@ -292,6 +292,17 @@ impl VM {
                 OpCode::SetLocal(slot) => {
                     self.stack[slot] = self.peek(0).clone();
                 }
+                OpCode::Jump(offset) => {
+                    self.ip += offset;
+                }
+                OpCode::JumpIfFalse(offset) => {
+                    if !Self::lox_bool_coercion(*self.peek(0)) {
+                        self.ip += offset;
+                    }
+                }
+                OpCode::Loop(offset) => {
+                    self.ip -= offset;
+                }
             }
         }
     }

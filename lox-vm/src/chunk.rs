@@ -25,6 +25,9 @@ pub enum OpCode {
     SetGlobal(u64),
     SetLocal(usize),
     GetLocal(usize),
+    JumpIfFalse(usize),
+    Jump(usize),
+    Loop(usize), //Backwards offset instead of forward
     EOF,
 }
 
@@ -51,9 +54,10 @@ impl Chunk {
         self.constants.len() - 1
     }
 
-    pub fn append_chunk(&mut self, op: OpCode, line: usize) {
+    pub fn append_chunk(&mut self, op: OpCode, line: usize) -> usize {
         self.code.push(op);
         self.line_numbers.push(line);
+        self.code.len() - 1
     }
 
     pub fn add_string(&mut self, s: String) -> u64 {
@@ -62,5 +66,23 @@ impl Chunk {
         let hash_val = hasher.finish();
         self.new_strings.push(s);
         hash_val
+    }
+
+    pub fn patch_jump(&mut self, instruction_idx: usize, offset: usize) {
+        match &mut self.code[instruction_idx] {
+            OpCode::JumpIfFalse(j) | OpCode::Jump(j) => *j = offset,
+            _ => panic!(format!(
+                "Cant patch opcode {:?}",
+                self.code[instruction_idx]
+            )),
+        };
+    }
+
+    pub fn next(&self) -> usize {
+        self.code.len()
+    }
+
+    pub fn top(&self) -> usize {
+        self.code.len() - 1
     }
 }
