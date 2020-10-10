@@ -1,5 +1,5 @@
 use super::chunk::*;
-use super::value::{FromValue, FromValueRef, Object, ToValue, Value};
+use super::value::{FromValue, FromValueRef, Function, Object, ToValue, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
@@ -20,24 +20,32 @@ impl InterpreterError {
     }
 }
 
+#[derive(Clone, Copy)]
+pub struct CallFrame {
+    function_pointer: usize,
+    ip: usize,
+    stack_pointer: usize,
+}
+
 pub struct VM {
-    chunk: Chunk, //Current chunk to be executed. Takes ownership of the chunk during execution
-    ip: usize,    // Instruction pointer
     stack: Vec<Value>,
     heap: HashMap<usize, Object>,
+    next_addr: usize,
     globals: HashMap<u64, Value>,
     strings: HashMap<u64, String>,
+    //Never holds the active frame
+    call_frames: Vec<CallFrame>,
 }
 
 impl VM {
     pub fn new() -> VM {
         VM {
-            chunk: Chunk::new(),
-            ip: 0,
             stack: vec![],
             heap: HashMap::new(),
+            next_addr: 0,
             globals: HashMap::new(),
             strings: HashMap::new(),
+            call_frames: vec![],
         }
     }
 
@@ -54,31 +62,62 @@ impl VM {
         hash_val
     }
 
-    pub fn interpret(&mut self, chunk: Chunk) -> Result<(), InterpreterError> {
-        self.chunk = chunk;
+    pub fn next_addr(&mut self) -> usize {
+        let addr = self.next_addr;
+        self.next_addr += 1;
+        addr
+    }
+
+    pub fn interpret(&mut self, mut main: Function) -> Result<(), InterpreterError> {
         let mut new_strings: Vec<String> = vec![];
-        swap(&mut self.chunk.new_strings, &mut new_strings);
+        swap(&mut main.chunk.new_strings, &mut new_strings);
         for s in new_strings {
             self.add_new_string(s);
         }
 
-        self.ip = 0;
+        let fp = self.add_to_heap(Object::Function(main));
+        self.call_frames.push(CallFrame {
+            function_pointer: fp,
+            ip: 0,
+            stack_pointer: 0,
+        }); //Will be immediately popped when run is called.
         self.run()
     }
 
     #[inline]
-    fn consume(&mut self) -> OpCode {
-        if self.ip < self.chunk.code.len() {
-            let op = self.chunk.code[self.ip];
-            self.ip += 1;
+    fn current_call_frame(&self) -> CallFrame {
+        *self.call_frames.last().unwrap()
+    }
+
+    #[inline]
+    fn function_dref(&self, fp: usize) -> &Function {
+        self.heap[&fp].as_function()
+    }
+
+    #[inline]
+    fn chunk(&self, fp: usize) -> &Chunk {
+        &self.function_dref(fp).chunk
+    }
+
+    #[inline]
+    fn code(&self, fp: usize) -> &Vec<OpCode> {
+        &self.chunk(fp).code
+    }
+
+    #[inline]
+    fn consume(&self, frame: &mut CallFrame) -> OpCode {
+        let code = self.code(frame.function_pointer);
+        if frame.ip < code.len() {
+            let op = code[frame.ip];
+            frame.ip += 1;
             op
         } else {
             OpCode::EOF
         }
     }
 
-    fn read_constant(&self, address: usize) -> Value {
-        self.chunk.constants[address].clone()
+    fn read_constant(&self, frame: &CallFrame, address: usize) -> Value {
+        self.chunk(frame.function_pointer).constants[address].clone()
     }
 
     #[inline]
@@ -92,9 +131,9 @@ impl VM {
     }
 
     #[inline]
-    fn current_line(&self) -> usize {
+    fn current_line(&self, frame: &CallFrame) -> usize {
         //Since we've already advanced past it
-        self.chunk.line_numbers[self.ip - 1]
+        self.chunk(frame.function_pointer).line_numbers[frame.ip]
     }
 
     fn lox_bool_coercion(val: Value) -> bool {
@@ -107,10 +146,12 @@ impl VM {
 
     fn binary_op<T1: FromValue, T2: FromValue, R: ToValue>(
         &mut self,
+        frame: &CallFrame,
         bop: fn(T1, T2) -> R,
     ) -> Result<(), InterpreterError> {
-        let b = T2::as_val(self.pop(), self.current_line())?;
-        let a = T1::as_val(self.pop(), self.current_line())?;
+        let line = self.current_line(frame);
+        let b = T2::as_val(self.pop(), line)?;
+        let a = T1::as_val(self.pop(), line)?;
         let result = R::to_value(bop(a, b));
         self.push(result);
         Ok(())
@@ -164,7 +205,7 @@ impl VM {
         match value {
             Value::Number(n) => println!("{} : Number", n),
             Value::Boolean(b) => println!("{} : Boolean", b),
-            Value::Object(p) => println!("{:?} : Object", self.heap[&p]),
+            Value::Object(p) => unimplemented!(),
             Value::Nil => println!("nil : Nil"),
             Value::StrPtr(p) => println!("{}", self.get_string(p)),
         }
@@ -186,14 +227,23 @@ impl VM {
     }
 
     fn add_to_heap(&mut self, object: Object) -> usize {
-        let new_address = self.heap.len();
+        let new_address = self.next_addr();
         self.heap.insert(new_address, object);
         new_address
     }
 
+    fn read_stack(&self, frame: &CallFrame, offset: usize) -> Value {
+        self.stack[frame.stack_pointer + offset]
+    }
+
+    fn write_stack(&mut self, frame: &CallFrame, offset: usize, value: Value) {
+        self.stack[frame.stack_pointer + offset] = value;
+    }
+
     fn run(&mut self) -> Result<(), InterpreterError> {
+        let mut frame = self.call_frames.pop().unwrap();
         loop {
-            match self.consume() {
+            match self.consume(&mut frame) {
                 OpCode::EOF => return Ok(()),
                 OpCode::Return => {
                     let value = self.pop();
@@ -208,14 +258,14 @@ impl VM {
                     self.pop();
                 }
                 OpCode::Constant(address) => {
-                    let val = self.read_constant(address);
+                    let val = self.read_constant(&frame, address);
                     self.push(val);
                 }
                 OpCode::Negate => match self.pop() {
                     Value::Number(n) => self.push(Value::Number(-n)),
                     _ => {
                         return Err(InterpreterError::TypeError(
-                            self.current_line(),
+                            self.current_line(&frame),
                             String::from("Operand must be a number."),
                         ))
                     }
@@ -227,17 +277,17 @@ impl VM {
                         (Value::StrPtr(_), Value::StrPtr(_)) => {
                             self.string_concat()?;
                         }
-                        _ => self.binary_op(|a: f64, b: f64| a + b)?,
+                        _ => self.binary_op(&frame, |a: f64, b: f64| a + b)?,
                     };
                 }
                 OpCode::Subtract => {
-                    self.binary_op(|a: f64, b: f64| a - b)?;
+                    self.binary_op(&frame, |a: f64, b: f64| a - b)?;
                 }
                 OpCode::Multiply => {
-                    self.binary_op(|a: f64, b: f64| a * b)?;
+                    self.binary_op(&frame, |a: f64, b: f64| a * b)?;
                 }
                 OpCode::Divide => {
-                    self.binary_op(|a: f64, b: f64| a / b)?;
+                    self.binary_op(&frame, |a: f64, b: f64| a / b)?;
                 }
                 OpCode::Nil => {
                     self.stack.push(Value::Nil);
@@ -255,10 +305,10 @@ impl VM {
                     self.stack.push(Value::Boolean(result));
                 }
                 OpCode::Greater => {
-                    self.binary_op(|a: f64, b: f64| a > b)?;
+                    self.binary_op(&frame, |a: f64, b: f64| a > b)?;
                 }
                 OpCode::Less => {
-                    self.binary_op(|a: f64, b: f64| a < b)?;
+                    self.binary_op(&frame, |a: f64, b: f64| a < b)?;
                 }
                 OpCode::DefineGlobal(name_ptr) => {
                     let value = self.pop();
@@ -267,7 +317,7 @@ impl VM {
                 OpCode::GetGlobal(name_ptr) => {
                     if !self.globals.contains_key(&name_ptr) {
                         return Err(InterpreterError::NameError(
-                            self.current_line(),
+                            self.current_line(&frame),
                             format!("Undefined variable {}", self.get_string(name_ptr)),
                         ));
                     } else {
@@ -278,7 +328,7 @@ impl VM {
                 OpCode::SetGlobal(name_ptr) => {
                     if !self.globals.contains_key(&name_ptr) {
                         return Err(InterpreterError::NameError(
-                            self.current_line(),
+                            self.current_line(&frame),
                             format!("Undefined variable {}", self.get_string(name_ptr)),
                         ));
                     } else {
@@ -287,21 +337,23 @@ impl VM {
                     }
                 }
                 OpCode::GetLocal(slot) => {
-                    self.push(self.stack[slot]);
+                    let value = self.read_stack(&frame, slot);
+                    self.push(value);
                 }
                 OpCode::SetLocal(slot) => {
-                    self.stack[slot] = self.peek(0).clone();
+                    let value = self.peek(0).clone();
+                    self.write_stack(&frame, slot, value);
                 }
                 OpCode::Jump(offset) => {
-                    self.ip += offset;
+                    frame.ip += offset;
                 }
                 OpCode::JumpIfFalse(offset) => {
                     if !Self::lox_bool_coercion(*self.peek(0)) {
-                        self.ip += offset;
+                        frame.ip += offset;
                     }
                 }
                 OpCode::Loop(offset) => {
-                    self.ip -= offset;
+                    frame.ip -= offset;
                 }
             }
         }

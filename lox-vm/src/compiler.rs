@@ -62,7 +62,7 @@ struct Local {
 pub struct Compiler {
     tokens: Vec<Token>,
     current: usize,
-    chunk: Chunk,
+    function: Function,
     rules: Vec<ParseRule>,
     has_error: bool,
     locals: Vec<Local>,
@@ -74,7 +74,7 @@ impl Compiler {
         Compiler {
             tokens,
             current: 0,
-            chunk: Chunk::new(),
+            function: Function::new(String::from("main"), 0, FnType::Script),
             rules: Compiler::build_parse_rules(),
             has_error: false,
             locals: vec![],
@@ -270,9 +270,13 @@ impl Compiler {
         }
     }
 
+    fn chunk(&mut self) -> &mut Chunk {
+        &mut self.function.chunk
+    }
+
     fn emit_constant(&mut self, value: Value, line: usize) -> Result<(), CompilerError> {
-        let const_idx = self.chunk.add_constant(value);
-        self.chunk.append_chunk(OpCode::Constant(const_idx), line);
+        let const_idx = self.chunk().add_constant(value);
+        self.chunk().append_chunk(OpCode::Constant(const_idx), line);
         Ok(())
     }
 
@@ -312,15 +316,15 @@ impl Compiler {
         let (set_op, get_op) = if let Some(id) = self.resolve_local(&name, line)? {
             (OpCode::SetLocal(id), OpCode::GetLocal(id))
         } else {
-            let hash_value = self.chunk.add_string(name);
+            let hash_value = self.chunk().add_string(name);
             (OpCode::SetGlobal(hash_value), OpCode::GetGlobal(hash_value))
         };
 
         if can_assign && self.match_token(TokenType::Equal) {
             self.expression()?;
-            self.chunk.append_chunk(set_op, line);
+            self.chunk().append_chunk(set_op, line);
         } else {
-            self.chunk.append_chunk(get_op, line);
+            self.chunk().append_chunk(get_op, line);
         }
         Ok(())
     }
@@ -341,9 +345,9 @@ impl Compiler {
             (token.token_type, token.line)
         };
         match token_type {
-            TokenType::False => self.chunk.append_chunk(OpCode::False, line),
-            TokenType::True => self.chunk.append_chunk(OpCode::True, line),
-            TokenType::Nil => self.chunk.append_chunk(OpCode::Nil, line),
+            TokenType::False => self.chunk().append_chunk(OpCode::False, line),
+            TokenType::True => self.chunk().append_chunk(OpCode::True, line),
+            TokenType::Nil => self.chunk().append_chunk(OpCode::Nil, line),
             _ => {
                 return Err(CompilerError::SyntaxError(
                     String::from("Expected literal"),
@@ -416,24 +420,24 @@ impl Compiler {
 
         //Deal with the token itself
         match token_type {
-            TokenType::Plus => self.chunk.append_chunk(OpCode::Add, line),
-            TokenType::Minus => self.chunk.append_chunk(OpCode::Subtract, line),
-            TokenType::Star => self.chunk.append_chunk(OpCode::Multiply, line),
-            TokenType::Slash => self.chunk.append_chunk(OpCode::Divide, line),
-            TokenType::EqualEqual => self.chunk.append_chunk(OpCode::Equal, line),
+            TokenType::Plus => self.chunk().append_chunk(OpCode::Add, line),
+            TokenType::Minus => self.chunk().append_chunk(OpCode::Subtract, line),
+            TokenType::Star => self.chunk().append_chunk(OpCode::Multiply, line),
+            TokenType::Slash => self.chunk().append_chunk(OpCode::Divide, line),
+            TokenType::EqualEqual => self.chunk().append_chunk(OpCode::Equal, line),
             TokenType::BangEqual => {
-                self.chunk.append_chunk(OpCode::Equal, line);
-                self.chunk.append_chunk(OpCode::Not, line)
+                self.chunk().append_chunk(OpCode::Equal, line);
+                self.chunk().append_chunk(OpCode::Not, line)
             }
-            TokenType::Greater => self.chunk.append_chunk(OpCode::Greater, line),
+            TokenType::Greater => self.chunk().append_chunk(OpCode::Greater, line),
             TokenType::GreaterEqual => {
-                self.chunk.append_chunk(OpCode::Less, line);
-                self.chunk.append_chunk(OpCode::Not, line)
+                self.chunk().append_chunk(OpCode::Less, line);
+                self.chunk().append_chunk(OpCode::Not, line)
             }
-            TokenType::Less => self.chunk.append_chunk(OpCode::Less, line),
+            TokenType::Less => self.chunk().append_chunk(OpCode::Less, line),
             TokenType::LessEqual => {
-                self.chunk.append_chunk(OpCode::Greater, line);
-                self.chunk.append_chunk(OpCode::Not, line)
+                self.chunk().append_chunk(OpCode::Greater, line);
+                self.chunk().append_chunk(OpCode::Not, line)
             }
             _ => unimplemented!(),
         };
@@ -448,9 +452,9 @@ impl Compiler {
             let str_value = token.literal.as_ref().unwrap().clone();
             (str_value, token.line)
         };
-        let hash_value = self.chunk.add_string(str_value);
-        let const_idx = self.chunk.add_constant(Value::StrPtr(hash_value));
-        self.chunk.append_chunk(OpCode::Constant(const_idx), line);
+        let hash_value = self.chunk().add_string(str_value);
+        let const_idx = self.chunk().add_constant(Value::StrPtr(hash_value));
+        self.chunk().append_chunk(OpCode::Constant(const_idx), line);
         Ok(())
     }
 
@@ -463,8 +467,8 @@ impl Compiler {
         self.parse_precedence(Precedence::Unary)?;
 
         match token_type {
-            TokenType::Minus => self.chunk.append_chunk(OpCode::Negate, line),
-            TokenType::Bang => self.chunk.append_chunk(OpCode::Not, line),
+            TokenType::Minus => self.chunk().append_chunk(OpCode::Negate, line),
+            TokenType::Bang => self.chunk().append_chunk(OpCode::Not, line),
             _ => unimplemented!(),
         };
 
@@ -477,7 +481,7 @@ impl Compiler {
             .try_consume(TokenType::Semicolon, "Expected ';' after expression")?
             .line;
 
-        self.chunk.append_chunk(OpCode::Print, line);
+        self.chunk().append_chunk(OpCode::Print, line);
 
         Ok(())
     }
@@ -488,7 +492,7 @@ impl Compiler {
             .try_consume(TokenType::Semicolon, "Expected ';' after expression")?
             .line;
 
-        self.chunk.append_chunk(OpCode::Pop, line);
+        self.chunk().append_chunk(OpCode::Pop, line);
 
         Ok(())
     }
@@ -506,7 +510,7 @@ impl Compiler {
             }
         } {
             let local = self.locals.pop().unwrap();
-            self.chunk.append_chunk(OpCode::Pop, local.name.line);
+            self.chunk().append_chunk(OpCode::Pop, local.name.line);
         }
     }
 
@@ -552,7 +556,21 @@ impl Compiler {
             Ok(0) //Us a dummy address
         } else {
             let name = token.literal.unwrap().clone();
-            Ok(self.chunk.add_string(name))
+            Ok(self.chunk().add_string(name))
+        }
+    }
+
+    fn mark_initialized(&mut self) {
+        self.locals.last_mut().unwrap().initialized = true;
+    }
+
+    fn finish_define(&mut self, name_hash: u64, line: usize) {
+        if self.scope_depth == 0 {
+            //Only define globals at scope depth
+            self.chunk()
+                .append_chunk(OpCode::DefineGlobal(name_hash), line);
+        } else {
+            self.mark_initialized();
         }
     }
 
@@ -563,7 +581,7 @@ impl Compiler {
         if self.match_token(TokenType::Equal) {
             self.expression()?;
         } else {
-            self.chunk.append_chunk(OpCode::Nil, line);
+            self.chunk().append_chunk(OpCode::Nil, line);
         }
 
         self.try_consume(
@@ -571,27 +589,39 @@ impl Compiler {
             "Expected ';' after variable declaration",
         )?;
 
-        if self.scope_depth == 0 {
-            //Only define globals at scope depth
-            self.chunk
-                .append_chunk(OpCode::DefineGlobal(name_hash), line);
-        } else {
-            self.locals.last_mut().unwrap().initialized = true;
-        }
+        //If global, define as global, if local, mark initialized
+        self.finish_define(name_hash, line);
+
+        Ok(())
+    }
+
+    fn parse_function(&mut self) -> Result<(), CompilerError> {
+        Ok(())
+    }
+
+    fn fun_declaration(&mut self) -> Result<(), CompilerError> {
+        let name_hash = self.parse_variable("Expected function name")?;
+        let line = self.peek().line;
+        self.finish_define(name_hash, line);
+
+        self.parse_function();
+
         Ok(())
     }
 
     fn declaration(&mut self) -> Result<(), CompilerError> {
         if self.match_token(TokenType::Var) {
             self.var_declaration()
+        } else if self.match_token(TokenType::Fun) {
+            self.fun_declaration()
         } else {
             self.statement()
         }
     }
 
     fn patch_jump(&mut self, instruction_idx: usize) {
-        let offset = self.chunk.top() - instruction_idx;
-        self.chunk.patch_jump(instruction_idx, offset);
+        let offset = self.chunk().top() - instruction_idx;
+        self.chunk().patch_jump(instruction_idx, offset);
     }
 
     fn if_statement(&mut self) -> Result<(), CompilerError> {
@@ -602,13 +632,13 @@ impl Compiler {
             .line;
 
         //Dummy value for jump which we will patch in later
-        let if_jump = self.chunk.append_chunk(OpCode::JumpIfFalse(0), line);
+        let if_jump = self.chunk().append_chunk(OpCode::JumpIfFalse(0), line);
 
         //We leave the predicate on the stack due to short circuiting (see 'and')
-        self.chunk.append_chunk(OpCode::Pop, line);
+        self.chunk().append_chunk(OpCode::Pop, line);
         self.statement()?;
 
-        let else_jump = self.chunk.append_chunk(OpCode::Jump(0), line);
+        let else_jump = self.chunk().append_chunk(OpCode::Jump(0), line);
 
         self.patch_jump(if_jump);
 
@@ -622,7 +652,7 @@ impl Compiler {
     }
 
     fn while_statement(&mut self) -> Result<(), CompilerError> {
-        let loop_start = self.chunk.next();
+        let loop_start = self.chunk().next();
 
         self.try_consume(TokenType::LeftParen, "Expected '(' after 'if'.")?;
         self.expression()?;
@@ -630,18 +660,18 @@ impl Compiler {
             .try_consume(TokenType::RightParen, "Expected ')' after condition.")?
             .line;
 
-        let exit_jump = self.chunk.append_chunk(OpCode::JumpIfFalse(0), line);
-        self.chunk.append_chunk(OpCode::Pop, line);
+        let exit_jump = self.chunk().append_chunk(OpCode::JumpIfFalse(0), line);
+        self.chunk().append_chunk(OpCode::Pop, line);
 
         self.statement()?;
 
         //Backwards offset instead of forward
-        let offset = (self.chunk.top() + 2) - loop_start;
-        self.chunk.append_chunk(OpCode::Loop(offset), line);
+        let offset = (self.chunk().top() + 2) - loop_start;
+        self.chunk().append_chunk(OpCode::Loop(offset), line);
 
         self.patch_jump(exit_jump);
 
-        self.chunk.append_chunk(OpCode::Pop, line);
+        self.chunk().append_chunk(OpCode::Pop, line);
 
         Ok(())
     }
@@ -658,7 +688,7 @@ impl Compiler {
             self.expression_statement()?;
         }
 
-        let loop_start = self.chunk.next();
+        let loop_start = self.chunk().next();
 
         let exit_jump = if !self.match_token(TokenType::Semicolon) {
             self.expression()?;
@@ -666,8 +696,8 @@ impl Compiler {
                 .try_consume(TokenType::Semicolon, "Expected ';'.")?
                 .line;
 
-            let exit_jump = self.chunk.append_chunk(OpCode::JumpIfFalse(0), line);
-            self.chunk.append_chunk(OpCode::Pop, line);
+            let exit_jump = self.chunk().append_chunk(OpCode::JumpIfFalse(0), line);
+            self.chunk().append_chunk(OpCode::Pop, line);
             Some(exit_jump)
         } else {
             None
@@ -675,16 +705,16 @@ impl Compiler {
 
         let loop_start = if !self.match_token(TokenType::RightParen) {
             let line = self.peek().line;
-            let body_jump = self.chunk.append_chunk(OpCode::Jump(0), line);
+            let body_jump = self.chunk().append_chunk(OpCode::Jump(0), line);
 
-            let increment_start = self.chunk.next();
+            let increment_start = self.chunk().next();
 
             self.expression()?;
-            self.chunk.append_chunk(OpCode::Pop, line);
+            self.chunk().append_chunk(OpCode::Pop, line);
             self.try_consume(TokenType::RightParen, "Expected ')' after 'for' clauses.")?;
 
-            let offset = (self.chunk.top() + 2) - loop_start;
-            self.chunk.append_chunk(OpCode::Loop(offset), line);
+            let offset = (self.chunk().top() + 2) - loop_start;
+            self.chunk().append_chunk(OpCode::Loop(offset), line);
 
             self.patch_jump(body_jump);
             increment_start
@@ -695,12 +725,12 @@ impl Compiler {
         self.statement()?;
 
         let line = self.peek().line;
-        let offset = (self.chunk.top() + 2) - loop_start;
-        self.chunk.append_chunk(OpCode::Loop(offset), line);
+        let offset = (self.chunk().top() + 2) - loop_start;
+        self.chunk().append_chunk(OpCode::Loop(offset), line);
 
         if let Some(exit_jump) = exit_jump {
             self.patch_jump(exit_jump);
-            self.chunk.append_chunk(OpCode::Pop, line);
+            self.chunk().append_chunk(OpCode::Pop, line);
         }
 
         self.end_scope();
@@ -709,9 +739,9 @@ impl Compiler {
 
     fn and(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
         let line = self.peek().line;
-        let end_jump = self.chunk.append_chunk(OpCode::JumpIfFalse(0), line);
+        let end_jump = self.chunk().append_chunk(OpCode::JumpIfFalse(0), line);
 
-        self.chunk.append_chunk(OpCode::Pop, line);
+        self.chunk().append_chunk(OpCode::Pop, line);
 
         self.parse_precedence(Precedence::And)?;
 
@@ -721,11 +751,11 @@ impl Compiler {
 
     fn or(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
         let line = self.peek().line;
-        let else_jump = self.chunk.append_chunk(OpCode::JumpIfFalse(0), line);
-        let end_jump = self.chunk.append_chunk(OpCode::Jump(0), line);
+        let else_jump = self.chunk().append_chunk(OpCode::JumpIfFalse(0), line);
+        let end_jump = self.chunk().append_chunk(OpCode::Jump(0), line);
 
         self.patch_jump(else_jump);
-        self.chunk.append_chunk(OpCode::Pop, line);
+        self.chunk().append_chunk(OpCode::Pop, line);
 
         self.parse_precedence(Precedence::Or)?;
 
@@ -755,7 +785,7 @@ impl Compiler {
         }
     }
 
-    pub fn compile(&mut self) -> Result<Chunk, ()> {
+    pub fn compile(&mut self) -> Result<Function, ()> {
         let mut old_idx = self.current;
         while !self.is_at_end() {
             let result = self.declaration();
@@ -775,7 +805,7 @@ impl Compiler {
         if self.has_error {
             Err(())
         } else {
-            Ok(self.chunk.clone())
+            Ok(self.function.clone())
         }
     }
 }

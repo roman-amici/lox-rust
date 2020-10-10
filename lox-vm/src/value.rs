@@ -1,3 +1,4 @@
+use super::chunk::Chunk;
 use super::interpreter::InterpreterError;
 
 #[derive(Debug, Copy, Clone)]
@@ -10,9 +11,48 @@ pub enum Value {
 }
 
 //Consider changing to a struct
-#[derive(Debug, Clone)]
 pub enum Object {
     String(String),
+    Function(Function),
+}
+
+impl Object {
+    pub fn as_function(&self) -> &Function {
+        if let Object::Function(f) = self {
+            f
+        } else {
+            panic!();
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum FnType {
+    Function,
+    Script,
+}
+
+#[derive(Clone)]
+pub struct Function {
+    pub fn_type: FnType,
+    pub arity: usize,
+    pub chunk: Chunk,
+    pub name: String,
+}
+
+impl Function {
+    pub fn new(name: String, arity: usize, fn_type: FnType) -> Function {
+        Function {
+            fn_type,
+            name,
+            arity,
+            chunk: Chunk::new(),
+        }
+    }
+
+    pub fn to_string(&self) -> String {
+        format!("fn {}({})", self.name, self.arity)
+    }
 }
 
 pub trait FromValue
