@@ -3,7 +3,12 @@ use super::token::*;
 use super::value::*;
 
 use num_enum::TryFromPrimitive;
+use rand::prelude::*;
+use rand::rngs::ThreadRng;
+use std::collections::hash_map::DefaultHasher;
 use std::convert::TryFrom;
+use std::hash::{Hash, Hasher};
+use std::mem::swap;
 
 pub enum CompilerError {
     SyntaxError(String, usize),
@@ -62,23 +67,37 @@ struct Local {
 pub struct Compiler {
     tokens: Vec<Token>,
     current: usize,
-    function: Function,
     rules: Vec<ParseRule>,
     has_error: bool,
+    code_scope: CodeScope,
+    new_strings: Vec<String>,
+    new_objects: Vec<(u64, Object)>,
+    rng: ThreadRng,
+}
+
+pub struct CodeScope {
+    function: Function,
     locals: Vec<Local>,
-    scope_depth: usize,
+    depth: usize,
 }
 
 impl Compiler {
     pub fn new(tokens: Vec<Token>) -> Compiler {
+        let scope = CodeScope {
+            function: Function::new(String::from("main"), 0, FnType::Script),
+            locals: vec![],
+            depth: 0,
+        };
+
         Compiler {
             tokens,
             current: 0,
-            function: Function::new(String::from("main"), 0, FnType::Script),
             rules: Compiler::build_parse_rules(),
+            code_scope: scope,
             has_error: false,
-            locals: vec![],
-            scope_depth: 0,
+            new_strings: vec![],
+            new_objects: vec![],
+            rng: rand::thread_rng(),
         }
     }
 
@@ -271,7 +290,7 @@ impl Compiler {
     }
 
     fn chunk(&mut self) -> &mut Chunk {
-        &mut self.function.chunk
+        &mut self.code_scope.function.chunk
     }
 
     fn emit_constant(&mut self, value: Value, line: usize) -> Result<(), CompilerError> {
@@ -285,11 +304,11 @@ impl Compiler {
         var_name: &String,
         line: usize,
     ) -> Result<Option<usize>, CompilerError> {
-        if self.locals.len() == 0 {
+        if self.code_scope.locals.len() == 0 {
             return Ok(None);
         }
-        let mut idx = self.locals.len() - 1;
-        for local in self.locals.iter().rev() {
+        let mut idx = self.code_scope.locals.len() - 1;
+        for local in self.code_scope.locals.iter().rev() {
             if local.name.lexeme == *var_name {
                 if local.initialized {
                     return Ok(Some(idx));
@@ -306,6 +325,20 @@ impl Compiler {
         Ok(None)
     }
 
+    pub fn add_string(&mut self, s: String) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        s.hash(&mut hasher);
+        let hash_val = hasher.finish();
+        self.new_strings.push(s);
+        hash_val
+    }
+
+    pub fn add_object(&mut self, o: Object) -> u64 {
+        let addr = self.rng.next_u64(); //Horrible hack, I know. Fix with virtual memory later.
+        self.new_objects.push((addr, o));
+        addr
+    }
+
     fn variable(&mut self, can_assign: bool) -> Result<(), CompilerError> {
         let (line, name) = {
             let token = self.previous();
@@ -316,7 +349,7 @@ impl Compiler {
         let (set_op, get_op) = if let Some(id) = self.resolve_local(&name, line)? {
             (OpCode::SetLocal(id), OpCode::GetLocal(id))
         } else {
-            let hash_value = self.chunk().add_string(name);
+            let hash_value = self.add_string(name);
             (OpCode::SetGlobal(hash_value), OpCode::GetGlobal(hash_value))
         };
 
@@ -452,7 +485,7 @@ impl Compiler {
             let str_value = token.literal.as_ref().unwrap().clone();
             (str_value, token.line)
         };
-        let hash_value = self.chunk().add_string(str_value);
+        let hash_value = self.add_string(str_value);
         let const_idx = self.chunk().add_constant(Value::StrPtr(hash_value));
         self.chunk().append_chunk(OpCode::Constant(const_idx), line);
         Ok(())
@@ -498,18 +531,18 @@ impl Compiler {
     }
 
     fn begin_scope(&mut self) {
-        self.scope_depth += 1;
+        self.code_scope.depth += 1;
     }
 
     fn end_scope(&mut self) {
-        self.scope_depth -= 1;
+        self.code_scope.depth -= 1;
         while {
-            match self.locals.last() {
-                Some(local) => local.depth > self.scope_depth, //Since we just decremented the depth
+            match self.code_scope.locals.last() {
+                Some(local) => local.depth > self.code_scope.depth, //Since we just decremented the depth
                 None => false,
             }
         } {
-            let local = self.locals.pop().unwrap();
+            let local = self.code_scope.locals.pop().unwrap();
             self.chunk().append_chunk(OpCode::Pop, local.name.line);
         }
     }
@@ -545,10 +578,10 @@ impl Compiler {
     fn parse_variable(&mut self, error_msg: &str) -> Result<u64, CompilerError> {
         let token = self.try_consume(TokenType::Identifier, error_msg)?;
 
-        if self.scope_depth > 0 {
-            self.locals.push(Local {
+        if self.code_scope.depth > 0 {
+            self.code_scope.locals.push(Local {
                 name: token.clone(),
-                depth: self.scope_depth,
+                depth: self.code_scope.depth,
                 initialized: false,
             });
             //I think shadowing is fine, so we won't look for duplicate id's
@@ -556,16 +589,16 @@ impl Compiler {
             Ok(0) //Us a dummy address
         } else {
             let name = token.literal.unwrap().clone();
-            Ok(self.chunk().add_string(name))
+            Ok(self.add_string(name))
         }
     }
 
     fn mark_initialized(&mut self) {
-        self.locals.last_mut().unwrap().initialized = true;
+        self.code_scope.locals.last_mut().unwrap().initialized = true;
     }
 
     fn finish_define(&mut self, name_hash: u64, line: usize) {
-        if self.scope_depth == 0 {
+        if self.code_scope.depth == 0 {
             //Only define globals at scope depth
             self.chunk()
                 .append_chunk(OpCode::DefineGlobal(name_hash), line);
@@ -596,15 +629,61 @@ impl Compiler {
     }
 
     fn parse_function(&mut self) -> Result<(), CompilerError> {
+        //Swap in a new scope for the new function
+        let function_name = self.previous().lexeme.clone();
+        let mut save_scope = CodeScope {
+            function: Function::new(function_name, 0, FnType::Function),
+            locals: vec![],
+            depth: 0,
+        };
+        swap(&mut save_scope, &mut self.code_scope);
+
+        self.begin_scope();
+        self.try_consume(TokenType::LeftParen, "Expected '(' after function name.")?;
+
+        if !self.check_token(TokenType::RightParen) {
+            loop {
+                self.code_scope.function.arity += 1;
+                //We can handle as much arity as possible!
+
+                let string_hash = self.parse_variable("Expected parameter name")?;
+                let line = self.previous().line;
+
+                self.finish_define(string_hash, line);
+
+                if !self.match_token(TokenType::Comma) {
+                    break;
+                }
+            }
+        }
+
+        self.try_consume(
+            TokenType::RightParen,
+            "Expected ')' after function parameters.",
+        )?;
+
+        self.try_consume(TokenType::LeftBrace, "Expected '{' before function body.")?;
+        self.block()?;
+
+        //endCompiler()
+        swap(&mut save_scope, &mut self.code_scope);
+
+        let line = self.peek().line;
+
+        let addr = self.add_object(Object::Function(save_scope.function));
+        let c_addr = self.chunk().add_constant(Value::Object(addr));
+        self.chunk().append_chunk(OpCode::Constant(c_addr), line);
+
         Ok(())
     }
 
     fn fun_declaration(&mut self) -> Result<(), CompilerError> {
         let name_hash = self.parse_variable("Expected function name")?;
         let line = self.peek().line;
-        self.finish_define(name_hash, line);
 
-        self.parse_function();
+        self.parse_function()?;
+
+        self.finish_define(name_hash, line);
 
         Ok(())
     }
@@ -785,7 +864,7 @@ impl Compiler {
         }
     }
 
-    pub fn compile(&mut self) -> Result<Function, ()> {
+    pub fn compile(&mut self) -> Result<(Function, Vec<String>, Vec<(u64, Object)>), ()> {
         let mut old_idx = self.current;
         while !self.is_at_end() {
             let result = self.declaration();
@@ -805,7 +884,11 @@ impl Compiler {
         if self.has_error {
             Err(())
         } else {
-            Ok(self.function.clone())
+            Ok((
+                self.code_scope.function.clone(),
+                self.new_strings.clone(),
+                self.new_objects.clone(),
+            ))
         }
     }
 }

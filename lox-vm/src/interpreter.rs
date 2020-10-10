@@ -22,15 +22,15 @@ impl InterpreterError {
 
 #[derive(Clone, Copy)]
 pub struct CallFrame {
-    function_pointer: usize,
+    function_pointer: u64,
     ip: usize,
     stack_pointer: usize,
 }
 
 pub struct VM {
     stack: Vec<Value>,
-    heap: HashMap<usize, Object>,
-    next_addr: usize,
+    heap: HashMap<u64, Object>,
+    next_addr: u64,
     globals: HashMap<u64, Value>,
     strings: HashMap<u64, String>,
     //Never holds the active frame
@@ -62,15 +62,22 @@ impl VM {
         hash_val
     }
 
-    pub fn next_addr(&mut self) -> usize {
+    pub fn next_addr(&mut self) -> u64 {
         let addr = self.next_addr;
         self.next_addr += 1;
         addr
     }
 
-    pub fn interpret(&mut self, mut main: Function) -> Result<(), InterpreterError> {
-        let mut new_strings: Vec<String> = vec![];
-        swap(&mut main.chunk.new_strings, &mut new_strings);
+    pub fn interpret(
+        &mut self,
+        mut main: Function,
+        new_strings: Vec<String>,
+        new_objects: Vec<(u64, Object)>,
+    ) -> Result<(), InterpreterError> {
+        for (addr, o) in new_objects {
+            self.add_to_heap_addr(addr, o);
+        }
+
         for s in new_strings {
             self.add_new_string(s);
         }
@@ -85,22 +92,17 @@ impl VM {
     }
 
     #[inline]
-    fn current_call_frame(&self) -> CallFrame {
-        *self.call_frames.last().unwrap()
-    }
-
-    #[inline]
-    fn function_dref(&self, fp: usize) -> &Function {
+    fn function_dref(&self, fp: u64) -> &Function {
         self.heap[&fp].as_function()
     }
 
     #[inline]
-    fn chunk(&self, fp: usize) -> &Chunk {
+    fn chunk(&self, fp: u64) -> &Chunk {
         &self.function_dref(fp).chunk
     }
 
     #[inline]
-    fn code(&self, fp: usize) -> &Vec<OpCode> {
+    fn code(&self, fp: u64) -> &Vec<OpCode> {
         &self.chunk(fp).code
     }
 
@@ -205,7 +207,7 @@ impl VM {
         match value {
             Value::Number(n) => println!("{} : Number", n),
             Value::Boolean(b) => println!("{} : Boolean", b),
-            Value::Object(p) => unimplemented!(),
+            Value::Object(p) => println!("{}", self.follow(p)),
             Value::Nil => println!("nil : Nil"),
             Value::StrPtr(p) => println!("{}", self.get_string(p)),
         }
@@ -215,18 +217,18 @@ impl VM {
         &self.stack[self.stack.len() - 1 - look_back]
     }
 
-    fn follow(&self, pointer: usize) -> &Object {
+    fn follow(&self, pointer: u64) -> &Object {
         &self.heap[&pointer]
     }
 
-    fn deref(&self, value: &Value) -> Option<&Object> {
-        match value {
-            Value::Object(p) => Some(&self.heap[p]),
-            _ => None,
+    fn add_to_heap_addr(&mut self, addr: u64, object: Object) {
+        if self.heap.contains_key(&addr) {
+            panic!("Heap collision for {}", addr);
+        } else {
+            self.heap.insert(addr, object);
         }
     }
-
-    fn add_to_heap(&mut self, object: Object) -> usize {
+    fn add_to_heap(&mut self, object: Object) -> u64 {
         let new_address = self.next_addr();
         self.heap.insert(new_address, object);
         new_address

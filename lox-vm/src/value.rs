@@ -1,16 +1,19 @@
 use super::chunk::Chunk;
 use super::interpreter::InterpreterError;
+use std::fmt;
+use std::fmt::{Display, Formatter};
 
 #[derive(Debug, Copy, Clone)]
 pub enum Value {
     Number(f64),
     Boolean(bool),
-    Object(usize),
+    Object(u64),
     StrPtr(u64),
     Nil,
 }
 
 //Consider changing to a struct
+#[derive(Clone)]
 pub enum Object {
     String(String),
     Function(Function),
@@ -22,6 +25,15 @@ impl Object {
             f
         } else {
             panic!();
+        }
+    }
+}
+
+impl Display for Object {
+    fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
+        match self {
+            Object::String(s) => write!(f, "{}", s),
+            Object::Function(func) => write!(f, "{}", func.to_string()),
         }
     }
 }

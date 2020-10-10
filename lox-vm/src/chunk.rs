@@ -1,6 +1,5 @@
 use super::value::{Object, Value};
 use std::collections::hash_map::DefaultHasher;
-use std::hash::{Hash, Hasher};
 
 #[derive(Debug, Copy, Clone)]
 pub enum OpCode {
@@ -36,7 +35,6 @@ pub struct Chunk {
     pub code: Vec<OpCode>,
     pub constants: Vec<Value>,
     pub line_numbers: Vec<usize>,
-    pub new_strings: Vec<String>,
 }
 
 impl Chunk {
@@ -45,7 +43,6 @@ impl Chunk {
             code: vec![],
             constants: vec![],
             line_numbers: vec![],
-            new_strings: vec![],
         }
     }
 
@@ -58,14 +55,6 @@ impl Chunk {
         self.code.push(op);
         self.line_numbers.push(line);
         self.code.len() - 1
-    }
-
-    pub fn add_string(&mut self, s: String) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        s.hash(&mut hasher);
-        let hash_val = hasher.finish();
-        self.new_strings.push(s);
-        hash_val
     }
 
     pub fn patch_jump(&mut self, instruction_idx: usize, offset: usize) {
