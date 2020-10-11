@@ -50,7 +50,7 @@ fn run(source: &String, interpreter: &mut interpreter::VM) {
     let tokens = scanner::scan_tokens(source).unwrap();
     let mut compiler = compiler::Compiler::new(tokens);
     if let Ok((main, new_strings, new_objects)) = compiler.compile() {
-        //println!("{:?}", main.chunk.code);
+        println!("{:?}", main.chunk.code);
         if let Err(e) = interpreter.interpret(main, new_strings, new_objects) {
             println!("An error ocurred while interpreting");
             println!("Runtime Error: {}", e.to_string())

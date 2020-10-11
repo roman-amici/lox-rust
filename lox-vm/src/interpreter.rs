@@ -8,14 +8,17 @@ use std::mem::swap;
 pub enum InterpreterError {
     TypeError(usize, String),
     NameError(usize, String),
+    FunctionError(usize, String),
+    MemoryError(usize, String),
 }
 
 impl InterpreterError {
     pub fn to_string(&self) -> String {
         match self {
-            InterpreterError::TypeError(line, msg) | InterpreterError::NameError(line, msg) => {
-                format!("{}: {}", line, msg)
-            }
+            InterpreterError::TypeError(line, msg)
+            | InterpreterError::NameError(line, msg)
+            | InterpreterError::FunctionError(line, msg)
+            | InterpreterError::MemoryError(line, msg) => format!("{}: {}", line, msg),
         }
     }
 }
@@ -120,6 +123,17 @@ impl VM {
 
     fn read_constant(&self, frame: &CallFrame, address: usize) -> Value {
         self.chunk(frame.function_pointer).constants[address].clone()
+    }
+
+    fn deref(&self, ptr: u64) -> Result<&Object, InterpreterError> {
+        if self.heap.contains_key(&ptr) {
+            Ok(&self.heap[&ptr])
+        } else {
+            Err(InterpreterError::MemoryError(
+                0,
+                String::from("Attempt to dereference invalid address"),
+            ))
+        }
     }
 
     #[inline]
@@ -242,15 +256,42 @@ impl VM {
         self.stack[frame.stack_pointer + offset] = value;
     }
 
+    fn get_function_pointer(
+        &mut self,
+        frame: &CallFrame,
+        offset: usize,
+    ) -> Result<u64, InterpreterError> {
+        let line = self.current_line(frame);
+        if let Value::Object(ptr) = self.peek(offset) {
+            if let Object::Function(f) = self.deref(*ptr)? {
+                return Ok(*ptr);
+            }
+        }
+
+        Err(InterpreterError::FunctionError(
+            line,
+            String::from("Attempt to call a value which is not a function"),
+        ))
+    }
+
     fn run(&mut self) -> Result<(), InterpreterError> {
         let mut frame = self.call_frames.pop().unwrap();
         loop {
             match self.consume(&mut frame) {
                 OpCode::EOF => return Ok(()),
                 OpCode::Return => {
-                    let value = self.pop();
-                    self.print(value);
-                    return Ok(());
+                    let result = self.pop();
+                    if self.call_frames.len() == 0 {
+                        return Ok(());
+                    }
+
+                    //Pop the function values off the stack.
+                    while self.stack.len() - 1 > frame.stack_pointer {
+                        self.pop();
+                    }
+
+                    self.push(result);
+                    frame = self.call_frames.pop().unwrap();
                 }
                 OpCode::Print => {
                     let value = self.pop();
@@ -356,6 +397,36 @@ impl VM {
                 }
                 OpCode::Loop(offset) => {
                     frame.ip -= offset;
+                }
+                OpCode::Call(num_args) => {
+                    let line = self.current_line(&frame);
+                    let function_pointer = self.get_function_pointer(&frame, num_args)?;
+                    let fun_obj = self.function_dref(function_pointer);
+
+                    if fun_obj.arity != num_args {
+                        return Err(InterpreterError::FunctionError(
+                            line,
+                            format!("Expected {} arguments but got {}", num_args, fun_obj.arity),
+                        ));
+                    }
+
+                    self.call_frames.push(frame.clone());
+
+                    if self.call_frames.len() > 256 {
+                        return Err(InterpreterError::FunctionError(
+                            line,
+                            String::from("Stack overflow"),
+                        ));
+                    }
+
+                    //TODO: print stack trace
+
+                    let stack_pointer = self.stack.len() - num_args;
+                    frame = CallFrame {
+                        function_pointer,
+                        ip: 0,
+                        stack_pointer,
+                    }
                 }
             }
         }

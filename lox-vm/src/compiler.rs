@@ -111,9 +111,9 @@ impl Compiler {
             let token_type: TokenType = TokenType::try_from(i).unwrap();
             match token_type {
                 TokenType::LeftParen => rules.push(ParseRule {
-                    prefix: Some(Compiler::grouping),
-                    infix: None,
-                    precedence: Precedence::None,
+                    prefix: Some(Self::grouping),
+                    infix: Some(Self::call),
+                    precedence: Precedence::Call,
                 }),
                 TokenType::Minus => rules.push(ParseRule {
                     prefix: Some(Compiler::unary),
@@ -556,6 +556,27 @@ impl Compiler {
         Ok(())
     }
 
+    fn return_statement(&mut self) -> Result<(), CompilerError> {
+        let line = self.previous().line;
+
+        if let FnType::Script = self.code_scope.function.fn_type {
+            return Err(CompilerError::SyntaxError(
+                String::from("Can't return from top-level code."),
+                line,
+            ));
+        }
+
+        if self.match_token(TokenType::Semicolon) {
+            self.chunk().append_chunk(OpCode::Nil, line);
+        } else {
+            self.expression()?;
+            self.try_consume(TokenType::Semicolon, "Expected ';' after return value")?;
+        }
+
+        self.chunk().append_chunk(OpCode::Return, line);
+        Ok(())
+    }
+
     fn statement(&mut self) -> Result<(), CompilerError> {
         if self.match_token(TokenType::Print) {
             self.print_statement()
@@ -566,6 +587,8 @@ impl Compiler {
             Ok(())
         } else if self.match_token(TokenType::If) {
             self.if_statement()
+        } else if self.match_token(TokenType::Return) {
+            self.return_statement()
         } else if self.match_token(TokenType::While) {
             self.while_statement()
         } else if self.match_token(TokenType::For) {
@@ -813,6 +836,30 @@ impl Compiler {
         }
 
         self.end_scope();
+        Ok(())
+    }
+
+    fn argument_list(&mut self) -> Result<usize, CompilerError> {
+        let mut arg_count = 0;
+        if !self.check_token(TokenType::RightParen) {
+            loop {
+                self.expression()?;
+                arg_count += 1;
+                if !self.match_token(TokenType::Comma) {
+                    break;
+                }
+            }
+        }
+
+        self.try_consume(TokenType::RightParen, "Expected ')' after arguments.")?;
+        Ok(arg_count)
+    }
+
+    fn call(&mut self, _canAssign: bool) -> Result<(), CompilerError> {
+        let arg_count = self.argument_list()?;
+        let line = self.previous().line;
+        self.chunk().append_chunk(OpCode::Call(arg_count), line);
+
         Ok(())
     }
 

@@ -27,6 +27,7 @@ pub enum OpCode {
     JumpIfFalse(usize),
     Jump(usize),
     Loop(usize), //Backwards offset instead of forward
+    Call(usize),
     EOF,
 }
 
