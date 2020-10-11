@@ -307,8 +307,9 @@ impl Compiler {
         if self.code_scope.locals.len() == 0 {
             return Ok(None);
         }
-        let mut idx = self.code_scope.locals.len() - 1;
-        for local in self.code_scope.locals.iter().rev() {
+        let high = self.code_scope.locals.len() - 1;
+        for (cnt, local) in self.code_scope.locals.iter().rev().enumerate() {
+            let idx = high - cnt;
             if local.name.lexeme == *var_name {
                 if local.initialized {
                     return Ok(Some(idx));
@@ -319,7 +320,6 @@ impl Compiler {
                     ));
                 }
             }
-            idx -= 1;
         }
 
         Ok(None)
@@ -572,7 +572,6 @@ impl Compiler {
             self.expression()?;
             self.try_consume(TokenType::Semicolon, "Expected ';' after return value")?;
         }
-
         self.chunk().append_chunk(OpCode::Return, line);
         Ok(())
     }
@@ -687,6 +686,11 @@ impl Compiler {
 
         self.try_consume(TokenType::LeftBrace, "Expected '{' before function body.")?;
         self.block()?;
+
+        //Implicitly return nil
+        let line = self.peek().line;
+        self.chunk().append_chunk(OpCode::Nil, line);
+        self.chunk().append_chunk(OpCode::Return, line);
 
         //endCompiler()
         swap(&mut save_scope, &mut self.code_scope);
@@ -855,7 +859,7 @@ impl Compiler {
         Ok(arg_count)
     }
 
-    fn call(&mut self, _canAssign: bool) -> Result<(), CompilerError> {
+    fn call(&mut self, _can_Assign: bool) -> Result<(), CompilerError> {
         let arg_count = self.argument_list()?;
         let line = self.previous().line;
         self.chunk().append_chunk(OpCode::Call(arg_count), line);

@@ -17,6 +17,7 @@ pub enum Value {
 pub enum Object {
     String(String),
     Function(Function),
+    NativeFunction(String, fn(Vec<Value>) -> Result<Value, InterpreterError>),
 }
 
 impl Object {
@@ -34,6 +35,7 @@ impl Display for Object {
         match self {
             Object::String(s) => write!(f, "{}", s),
             Object::Function(func) => write!(f, "{}", func.to_string()),
+            Object::NativeFunction(name, _) => write!(f, "<{} native>", name),
         }
     }
 }
@@ -63,7 +65,7 @@ impl Function {
     }
 
     pub fn to_string(&self) -> String {
-        format!("fn {}({})", self.name, self.arity)
+        format!("<fn {}(args[{}])", self.name, self.arity)
     }
 }
 

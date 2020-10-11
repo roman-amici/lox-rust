@@ -95,6 +95,18 @@ impl VM {
     }
 
     #[inline]
+    fn deref(&self, ptr: u64, line: usize) -> Result<&Object, InterpreterError> {
+        if self.heap.contains_key(&ptr) {
+            Ok(&self.heap[&ptr])
+        } else {
+            Err(InterpreterError::MemoryError(
+                line,
+                String::from("Invalid pointer dereference"),
+            ))
+        }
+    }
+
+    #[inline]
     fn function_dref(&self, fp: u64) -> &Function {
         self.heap[&fp].as_function()
     }
@@ -123,17 +135,6 @@ impl VM {
 
     fn read_constant(&self, frame: &CallFrame, address: usize) -> Value {
         self.chunk(frame.function_pointer).constants[address].clone()
-    }
-
-    fn deref(&self, ptr: u64) -> Result<&Object, InterpreterError> {
-        if self.heap.contains_key(&ptr) {
-            Ok(&self.heap[&ptr])
-        } else {
-            Err(InterpreterError::MemoryError(
-                0,
-                String::from("Attempt to dereference invalid address"),
-            ))
-        }
     }
 
     #[inline]
@@ -263,7 +264,7 @@ impl VM {
     ) -> Result<u64, InterpreterError> {
         let line = self.current_line(frame);
         if let Value::Object(ptr) = self.peek(offset) {
-            if let Object::Function(f) = self.deref(*ptr)? {
+            if let Object::Function(f) = self.deref(*ptr, line)? {
                 return Ok(*ptr);
             }
         }
@@ -272,6 +273,40 @@ impl VM {
             line,
             String::from("Attempt to call a value which is not a function"),
         ))
+    }
+
+    fn call_lox_function<'a>(
+        &'a self,
+        fp: u64,
+        fun_def: &'a Function,
+        frame: &CallFrame,
+        num_args: usize,
+    ) -> Result<(CallFrame, CallFrame), InterpreterError> {
+        let line = self.current_line(frame);
+
+        if fun_def.arity != num_args {
+            return Err(InterpreterError::FunctionError(
+                line,
+                format!("Expected {} arguments but got {}", num_args, fun_def.arity),
+            ));
+        }
+
+        //self.call_frames.push(frame.clone());
+
+        if self.call_frames.len() > 256 {
+            return Err(InterpreterError::FunctionError(
+                line,
+                String::from("Stack overflow"),
+            ));
+        }
+
+        let stack_pointer = self.stack.len() - num_args;
+        let new_frame = CallFrame {
+            function_pointer: fp,
+            ip: 0,
+            stack_pointer,
+        };
+        Ok((*frame, new_frame))
     }
 
     fn run(&mut self) -> Result<(), InterpreterError> {
@@ -286,9 +321,10 @@ impl VM {
                     }
 
                     //Pop the function values off the stack.
-                    while self.stack.len() - 1 > frame.stack_pointer {
+                    while self.stack.len() > frame.stack_pointer {
                         self.pop();
                     }
+                    self.pop(); //And the function address
 
                     self.push(result);
                     frame = self.call_frames.pop().unwrap();
@@ -399,33 +435,33 @@ impl VM {
                     frame.ip -= offset;
                 }
                 OpCode::Call(num_args) => {
+                    let fp = self.get_function_pointer(&frame, num_args)?;
                     let line = self.current_line(&frame);
-                    let function_pointer = self.get_function_pointer(&frame, num_args)?;
-                    let fun_obj = self.function_dref(function_pointer);
+                    let obj = self.deref(fp, line)?;
 
-                    if fun_obj.arity != num_args {
-                        return Err(InterpreterError::FunctionError(
-                            line,
-                            format!("Expected {} arguments but got {}", num_args, fun_obj.arity),
-                        ));
-                    }
-
-                    self.call_frames.push(frame.clone());
-
-                    if self.call_frames.len() > 256 {
-                        return Err(InterpreterError::FunctionError(
-                            line,
-                            String::from("Stack overflow"),
-                        ));
-                    }
-
-                    //TODO: print stack trace
-
-                    let stack_pointer = self.stack.len() - num_args;
-                    frame = CallFrame {
-                        function_pointer,
-                        ip: 0,
-                        stack_pointer,
+                    match obj {
+                        Object::Function(fun_def) => {
+                            let (old_frame, new_frame) =
+                                self.call_lox_function(fp, fun_def, &frame, num_args)?;
+                            self.call_frames.push(old_frame);
+                            frame = new_frame;
+                        }
+                        Object::NativeFunction(_, body) => {
+                            let body = *body;
+                            let mut native_call_stack: Vec<Value> = vec![];
+                            for _ in 0..num_args {
+                                let value = self.pop();
+                                native_call_stack.push(value);
+                            }
+                            let result = body(native_call_stack)?;
+                            self.push(result);
+                        }
+                        _ => {
+                            return Err(InterpreterError::FunctionError(
+                                line,
+                                String::from("Attempted to call an object that's not callable"),
+                            ))
+                        }
                     }
                 }
             }

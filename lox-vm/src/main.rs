@@ -51,6 +51,11 @@ fn run(source: &String, interpreter: &mut interpreter::VM) {
     let mut compiler = compiler::Compiler::new(tokens);
     if let Ok((main, new_strings, new_objects)) = compiler.compile() {
         println!("{:?}", main.chunk.code);
+        for (_, obj) in new_objects.iter() {
+            if let value::Object::Function(f) = obj {
+                println!("{:?}", f.chunk.code);
+            }
+        }
         if let Err(e) = interpreter.interpret(main, new_strings, new_objects) {
             println!("An error ocurred while interpreting");
             println!("Runtime Error: {}", e.to_string())
