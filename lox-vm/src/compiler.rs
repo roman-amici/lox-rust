@@ -8,7 +8,6 @@ use rand::rngs::ThreadRng;
 use std::collections::hash_map::DefaultHasher;
 use std::convert::TryFrom;
 use std::hash::{Hash, Hasher};
-use std::mem::swap;
 
 pub enum CompilerError {
     SyntaxError(String, usize),
@@ -69,7 +68,7 @@ pub struct Compiler {
     current: usize,
     rules: Vec<ParseRule>,
     has_error: bool,
-    code_scope: CodeScope,
+    code_scopes: Vec<CodeScope>,
     new_strings: Vec<String>,
     new_objects: Vec<(u64, Object)>,
     rng: ThreadRng,
@@ -78,6 +77,7 @@ pub struct Compiler {
 pub struct CodeScope {
     function: Function,
     locals: Vec<Local>,
+    upvalues: Vec<Upvalue>,
     depth: usize,
 }
 
@@ -86,6 +86,7 @@ impl Compiler {
         let scope = CodeScope {
             function: Function::new(String::from("main"), 0, FnType::Script),
             locals: vec![],
+            upvalues: vec![],
             depth: 0,
         };
 
@@ -93,7 +94,7 @@ impl Compiler {
             tokens,
             current: 0,
             rules: Compiler::build_parse_rules(),
-            code_scope: scope,
+            code_scopes: vec![scope],
             has_error: false,
             new_strings: vec![],
             new_objects: vec![],
@@ -289,8 +290,12 @@ impl Compiler {
         }
     }
 
+    fn code_scope(&mut self) -> &mut CodeScope {
+        self.code_scopes.last_mut().unwrap()
+    }
+
     fn chunk(&mut self) -> &mut Chunk {
-        &mut self.code_scope.function.chunk
+        &mut self.code_scope().function.chunk
     }
 
     fn emit_constant(&mut self, value: Value, line: usize) -> Result<(), CompilerError> {
@@ -300,15 +305,15 @@ impl Compiler {
     }
 
     fn resolve_local(
-        &self,
+        code_scope: &CodeScope,
         var_name: &String,
         line: usize,
     ) -> Result<Option<usize>, CompilerError> {
-        if self.code_scope.locals.len() == 0 {
+        if code_scope.locals.len() == 0 {
             return Ok(None);
         }
-        let high = self.code_scope.locals.len() - 1;
-        for (cnt, local) in self.code_scope.locals.iter().rev().enumerate() {
+        let high = code_scope.locals.len() - 1;
+        for (cnt, local) in code_scope.locals.iter().rev().enumerate() {
             let idx = high - cnt;
             if local.name.lexeme == *var_name {
                 if local.initialized {
@@ -339,6 +344,44 @@ impl Compiler {
         addr
     }
 
+    fn add_upvalue(code_scope: &mut CodeScope, index: usize, is_local: bool) -> usize {
+        for (i, upvalue) in code_scope.upvalues.iter().enumerate() {
+            if upvalue.index == index && upvalue.is_local == is_local {
+                return i;
+            }
+        }
+
+        code_scope.upvalues.push(Upvalue { index, is_local });
+        code_scope.upvalues.len() - 1
+    }
+
+    fn resolve_upvalue(
+        &mut self,
+        code_scope_idx: usize,
+        name: &String,
+        line: usize,
+    ) -> Result<Option<usize>, CompilerError> {
+        if code_scope_idx == 0 {
+            Ok(None) //Zero in codescopes is global scope which is resolved separately.
+        } else if let Some(id) =
+            Self::resolve_local(&self.code_scopes[code_scope_idx - 1], name, line)?
+        {
+            Ok(Some(Self::add_upvalue(
+                &mut self.code_scopes[code_scope_idx],
+                id,
+                true,
+            )))
+        } else if let Some(id) = self.resolve_upvalue(code_scope_idx - 1, name, line)? {
+            Ok(Some(Self::add_upvalue(
+                &mut self.code_scopes[code_scope_idx],
+                id,
+                false,
+            )))
+        } else {
+            Ok(None)
+        }
+    }
+
     fn variable(&mut self, can_assign: bool) -> Result<(), CompilerError> {
         let (line, name) = {
             let token = self.previous();
@@ -346,8 +389,12 @@ impl Compiler {
             (token.line, name)
         };
 
-        let (set_op, get_op) = if let Some(id) = self.resolve_local(&name, line)? {
+        let (set_op, get_op) = if let Some(id) =
+            Self::resolve_local(&self.code_scope(), &name, line)?
+        {
             (OpCode::SetLocal(id), OpCode::GetLocal(id))
+        } else if let Some(id) = self.resolve_upvalue(self.code_scopes.len() - 1, &name, line)? {
+            (OpCode::SetUpValue(id), OpCode::GetUpValue(id))
         } else {
             let hash_value = self.add_string(name);
             (OpCode::SetGlobal(hash_value), OpCode::GetGlobal(hash_value))
@@ -531,18 +578,18 @@ impl Compiler {
     }
 
     fn begin_scope(&mut self) {
-        self.code_scope.depth += 1;
+        self.code_scope().depth += 1;
     }
 
     fn end_scope(&mut self) {
-        self.code_scope.depth -= 1;
+        self.code_scope().depth -= 1;
         while {
-            match self.code_scope.locals.last() {
-                Some(local) => local.depth > self.code_scope.depth, //Since we just decremented the depth
+            match self.code_scope().locals.last() {
+                Some(local) => local.depth > self.code_scope().depth, //Since we just decremented the depth
                 None => false,
             }
         } {
-            let local = self.code_scope.locals.pop().unwrap();
+            let local = self.code_scope().locals.pop().unwrap();
             self.chunk().append_chunk(OpCode::Pop, local.name.line);
         }
     }
@@ -559,7 +606,7 @@ impl Compiler {
     fn return_statement(&mut self) -> Result<(), CompilerError> {
         let line = self.previous().line;
 
-        if let FnType::Script = self.code_scope.function.fn_type {
+        if let FnType::Script = self.code_scope().function.fn_type {
             return Err(CompilerError::SyntaxError(
                 String::from("Can't return from top-level code."),
                 line,
@@ -600,12 +647,13 @@ impl Compiler {
     fn parse_variable(&mut self, error_msg: &str) -> Result<u64, CompilerError> {
         let token = self.try_consume(TokenType::Identifier, error_msg)?;
 
-        if self.code_scope.depth > 0 {
-            self.code_scope.locals.push(Local {
+        if self.code_scope().depth > 0 {
+            let local = Local {
                 name: token.clone(),
-                depth: self.code_scope.depth,
+                depth: self.code_scope().depth,
                 initialized: false,
-            });
+            };
+            self.code_scope().locals.push(local);
             //I think shadowing is fine, so we won't look for duplicate id's
 
             Ok(0) //Us a dummy address
@@ -616,11 +664,11 @@ impl Compiler {
     }
 
     fn mark_initialized(&mut self) {
-        self.code_scope.locals.last_mut().unwrap().initialized = true;
+        self.code_scope().locals.last_mut().unwrap().initialized = true;
     }
 
     fn finish_define(&mut self, name_hash: u64, line: usize) {
-        if self.code_scope.depth == 0 {
+        if self.code_scope().depth == 0 {
             //Only define globals at scope depth
             self.chunk()
                 .append_chunk(OpCode::DefineGlobal(name_hash), line);
@@ -653,19 +701,19 @@ impl Compiler {
     fn parse_function(&mut self) -> Result<(), CompilerError> {
         //Swap in a new scope for the new function
         let function_name = self.previous().lexeme.clone();
-        let mut save_scope = CodeScope {
+        self.code_scopes.push(CodeScope {
             function: Function::new(function_name, 0, FnType::Function),
             locals: vec![],
+            upvalues: vec![],
             depth: 0,
-        };
-        swap(&mut save_scope, &mut self.code_scope);
+        });
 
         self.begin_scope();
         self.try_consume(TokenType::LeftParen, "Expected '(' after function name.")?;
 
         if !self.check_token(TokenType::RightParen) {
             loop {
-                self.code_scope.function.arity += 1;
+                self.code_scope().function.arity += 1;
                 //We can handle as much arity as possible!
 
                 let string_hash = self.parse_variable("Expected parameter name")?;
@@ -692,14 +740,19 @@ impl Compiler {
         self.chunk().append_chunk(OpCode::Nil, line);
         self.chunk().append_chunk(OpCode::Return, line);
 
-        //endCompiler()
-        swap(&mut save_scope, &mut self.code_scope);
-
+        let mut function_scope = self.code_scopes.pop().unwrap();
         let line = self.peek().line;
 
-        let addr = self.add_object(Object::Function(save_scope.function));
+        let upvalue_count = function_scope.upvalues.len();
+        function_scope.function.upvalue_count = upvalue_count;
+        let addr = self.add_object(Object::Function(function_scope.function));
         let c_addr = self.chunk().add_constant(Value::Object(addr));
-        self.chunk().append_chunk(OpCode::Constant(c_addr), line);
+        self.chunk()
+            .append_chunk(OpCode::Closure(c_addr, upvalue_count), line);
+
+        for upvalue in function_scope.upvalues {
+            self.chunk().append_chunk(OpCode::Upvalue(upvalue), line);
+        }
 
         Ok(())
     }
@@ -936,7 +989,7 @@ impl Compiler {
             Err(())
         } else {
             Ok((
-                self.code_scope.function.clone(),
+                self.code_scope().function.clone(),
                 self.new_strings.clone(),
                 self.new_objects.clone(),
             ))

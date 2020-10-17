@@ -1,5 +1,4 @@
-use super::value::{Object, Value};
-use std::collections::hash_map::DefaultHasher;
+use super::value::Value;
 
 #[derive(Debug, Copy, Clone)]
 pub enum OpCode {
@@ -24,11 +23,21 @@ pub enum OpCode {
     SetGlobal(u64),
     SetLocal(usize),
     GetLocal(usize),
+    GetUpValue(usize),
+    SetUpValue(usize),
     JumpIfFalse(usize),
     Jump(usize),
     Loop(usize), //Backwards offset instead of forward
     Call(usize),
+    Closure(usize, usize), // (Constant pointer, number of upvalues)
+    Upvalue(Upvalue),
     EOF,
+}
+
+#[derive(Debug, Copy, Clone)]
+pub struct Upvalue {
+    pub is_local: bool,
+    pub index: usize, //Index in local slots
 }
 
 #[derive(Clone)]

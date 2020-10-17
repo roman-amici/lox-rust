@@ -1,9 +1,8 @@
 use super::chunk::*;
-use super::value::{FromValue, FromValueRef, Function, Object, ToValue, Value};
+use super::value::{Closure, FromValue, Function, Object, ToValue, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
-use std::mem::swap;
 
 pub enum InterpreterError {
     TypeError(usize, String),
@@ -25,7 +24,7 @@ impl InterpreterError {
 
 #[derive(Clone, Copy)]
 pub struct CallFrame {
-    function_pointer: u64,
+    closure_pointer: u64,
     ip: usize,
     stack_pointer: usize,
 }
@@ -73,7 +72,7 @@ impl VM {
 
     pub fn interpret(
         &mut self,
-        mut main: Function,
+        main: Function,
         new_strings: Vec<String>,
         new_objects: Vec<(u64, Object)>,
     ) -> Result<(), InterpreterError> {
@@ -86,8 +85,12 @@ impl VM {
         }
 
         let fp = self.add_to_heap(Object::Function(main));
-        self.call_frames.push(CallFrame {
+        let closure_p = self.add_to_heap(Object::Closure(Closure {
             function_pointer: fp,
+            closed_values: vec![],
+        }));
+        self.call_frames.push(CallFrame {
+            closure_pointer: closure_p,
             ip: 0,
             stack_pointer: 0,
         }); //Will be immediately popped when run is called.
@@ -107,23 +110,49 @@ impl VM {
     }
 
     #[inline]
-    fn function_dref(&self, fp: u64) -> &Function {
+    fn closure_deref(&self, closure_p: u64) -> &Closure {
+        self.heap[&closure_p].as_closure()
+    }
+
+    #[inline]
+    fn value_deref(&self, value_ptr: u64) -> Value {
+        self.heap[&value_ptr].as_value()
+    }
+
+    #[inline]
+    fn get_closed_value(&self, frame: &CallFrame, index: usize) -> Value {
+        let closure = self.closure_deref(frame.closure_pointer);
+        let value_ptr = closure.closed_values[index];
+        self.value_deref(value_ptr)
+    }
+
+    #[inline]
+    fn set_closed_value(&mut self, frame: &CallFrame, index: usize, value: Value) {
+        let closure = self.closure_deref(frame.closure_pointer);
+        let value_ptr = closure.closed_values[index];
+
+        self.heap.insert(value_ptr, Object::Value(value));
+    }
+
+    #[inline]
+    fn function_deref(&self, fp: u64) -> &Function {
         self.heap[&fp].as_function()
     }
 
     #[inline]
-    fn chunk(&self, fp: u64) -> &Chunk {
-        &self.function_dref(fp).chunk
+    fn chunk(&self, closure_p: u64) -> &Chunk {
+        let fp = self.closure_deref(closure_p).function_pointer;
+        &self.function_deref(fp).chunk
     }
 
     #[inline]
-    fn code(&self, fp: u64) -> &Vec<OpCode> {
-        &self.chunk(fp).code
+    fn code(&self, closure_p: u64) -> &Vec<OpCode> {
+        &self.chunk(closure_p).code
     }
 
     #[inline]
     fn consume(&self, frame: &mut CallFrame) -> OpCode {
-        let code = self.code(frame.function_pointer);
+        let code = self.code(frame.closure_pointer);
         if frame.ip < code.len() {
             let op = code[frame.ip];
             frame.ip += 1;
@@ -134,7 +163,7 @@ impl VM {
     }
 
     fn read_constant(&self, frame: &CallFrame, address: usize) -> Value {
-        self.chunk(frame.function_pointer).constants[address].clone()
+        self.chunk(frame.closure_pointer).constants[address].clone()
     }
 
     #[inline]
@@ -150,7 +179,7 @@ impl VM {
     #[inline]
     fn current_line(&self, frame: &CallFrame) -> usize {
         //Since we've already advanced past it
-        self.chunk(frame.function_pointer).line_numbers[frame.ip]
+        self.chunk(frame.closure_pointer).line_numbers[frame.ip]
     }
 
     fn lox_bool_coercion(val: Value) -> bool {
@@ -220,11 +249,9 @@ impl VM {
 
     fn print(&self, value: Value) {
         match value {
-            Value::Number(n) => println!("{} : Number", n),
-            Value::Boolean(b) => println!("{} : Boolean", b),
             Value::Object(p) => println!("{}", self.follow(p)),
-            Value::Nil => println!("nil : Nil"),
             Value::StrPtr(p) => println!("{}", self.get_string(p)),
+            _ => println!("{}", value),
         }
     }
 
@@ -257,32 +284,21 @@ impl VM {
         self.stack[frame.stack_pointer + offset] = value;
     }
 
-    fn get_function_pointer(
-        &mut self,
-        frame: &CallFrame,
-        offset: usize,
-    ) -> Result<u64, InterpreterError> {
-        let line = self.current_line(frame);
-        if let Value::Object(ptr) = self.peek(offset) {
-            if let Object::Function(f) = self.deref(*ptr, line)? {
-                return Ok(*ptr);
-            }
-        }
-
-        Err(InterpreterError::FunctionError(
-            line,
-            String::from("Attempt to call a value which is not a function"),
-        ))
-    }
-
     fn call_lox_function<'a>(
         &'a self,
-        fp: u64,
-        fun_def: &'a Function,
         frame: &CallFrame,
+        closure: &Closure,
+        closure_p: u64,
         num_args: usize,
     ) -> Result<(CallFrame, CallFrame), InterpreterError> {
-        let line = self.current_line(frame);
+        let line = self.current_line(&frame);
+        let obj = self.deref(closure.function_pointer, line)?;
+
+        let fun_def = if let Object::Function(fun_def) = obj {
+            fun_def
+        } else {
+            panic!("Expected a function object");
+        };
 
         if fun_def.arity != num_args {
             return Err(InterpreterError::FunctionError(
@@ -290,8 +306,6 @@ impl VM {
                 format!("Expected {} arguments but got {}", num_args, fun_def.arity),
             ));
         }
-
-        //self.call_frames.push(frame.clone());
 
         if self.call_frames.len() > 256 {
             return Err(InterpreterError::FunctionError(
@@ -302,11 +316,23 @@ impl VM {
 
         let stack_pointer = self.stack.len() - num_args;
         let new_frame = CallFrame {
-            function_pointer: fp,
+            closure_pointer: closure_p,
             ip: 0,
             stack_pointer,
         };
         Ok((*frame, new_frame))
+    }
+
+    fn capture_upvalue(&mut self, frame: &CallFrame, upvalue: Upvalue) -> u64 {
+        if upvalue.is_local {
+            let value = self.read_stack(frame, upvalue.index);
+            let idx = self.add_to_heap(Object::Value(value));
+            idx
+        } else {
+            //Already captured?
+            let parent_closure = self.closure_deref(frame.closure_pointer);
+            parent_closure.closed_values[upvalue.index]
+        }
     }
 
     fn run(&mut self) -> Result<(), InterpreterError> {
@@ -435,17 +461,18 @@ impl VM {
                     frame.ip -= offset;
                 }
                 OpCode::Call(num_args) => {
-                    let fp = self.get_function_pointer(&frame, num_args)?;
                     let line = self.current_line(&frame);
-                    let obj = self.deref(fp, line)?;
+                    let obj_ptr = if let Value::Object(obj_ptr) = self.peek(num_args) {
+                        *obj_ptr
+                    } else {
+                        return Err(InterpreterError::FunctionError(
+                            line,
+                            String::from("Attempt to call a value which is not a function"),
+                        ));
+                    };
+                    let obj = self.deref(obj_ptr, line)?;
 
                     match obj {
-                        Object::Function(fun_def) => {
-                            let (old_frame, new_frame) =
-                                self.call_lox_function(fp, fun_def, &frame, num_args)?;
-                            self.call_frames.push(old_frame);
-                            frame = new_frame;
-                        }
                         Object::NativeFunction(_, body) => {
                             let body = *body;
                             let mut native_call_stack: Vec<Value> = vec![];
@@ -456,13 +483,51 @@ impl VM {
                             let result = body(native_call_stack)?;
                             self.push(result);
                         }
+                        Object::Closure(closure) => {
+                            //Todo: upvalues
+                            let (old_frame, new_frame) =
+                                self.call_lox_function(&frame, &closure, obj_ptr, num_args)?;
+                            self.call_frames.push(old_frame);
+                            frame = new_frame;
+                        }
                         _ => {
+                            println!("{}", obj);
                             return Err(InterpreterError::FunctionError(
                                 line,
                                 String::from("Attempted to call an object that's not callable"),
-                            ))
+                            ));
                         }
                     }
+                }
+                OpCode::Closure(idx, num_upvalues) => {
+                    if let Value::Object(function_pointer) = self.read_constant(&frame, idx) {
+                        let mut closed_values: Vec<u64> = vec![];
+                        for _i in 0..num_upvalues {
+                            if let OpCode::Upvalue(upvalue) = self.consume(&mut frame) {
+                                closed_values.push(self.capture_upvalue(&frame, upvalue));
+                            } else {
+                                panic!("Expected upvalue op");
+                            }
+                        }
+                        let closure_addr = self.add_to_heap(Object::Closure(Closure {
+                            function_pointer,
+                            closed_values,
+                        }));
+                        self.push(Value::Object(closure_addr));
+                    } else {
+                        panic!("Expected closure object");
+                    }
+                }
+                OpCode::GetUpValue(value_index) => {
+                    let value = self.get_closed_value(&frame, value_index);
+                    self.push(value);
+                }
+                OpCode::SetUpValue(value_index) => {
+                    let value = *self.peek(0);
+                    self.set_closed_value(&frame, value_index, value);
+                }
+                OpCode::Upvalue(_) => {
+                    panic!("Upvalue instruction should be handled by closure instruction")
                 }
             }
         }
