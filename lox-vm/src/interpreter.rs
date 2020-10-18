@@ -37,6 +37,7 @@ pub struct VM {
     strings: HashMap<u64, String>,
     //Never holds the active frame
     call_frames: Vec<CallFrame>,
+    open_upvalues: Vec<(usize, usize, u64)>, //Nope, linear search.
 }
 
 impl VM {
@@ -48,6 +49,7 @@ impl VM {
             globals: HashMap::new(),
             strings: HashMap::new(),
             call_frames: vec![],
+            open_upvalues: vec![],
         }
     }
 
@@ -110,6 +112,11 @@ impl VM {
     }
 
     #[inline]
+    fn deref_internal(&self, ptr: u64) -> &Object {
+        &self.heap[&ptr]
+    }
+
+    #[inline]
     fn closure_deref(&self, closure_p: u64) -> &Closure {
         self.heap[&closure_p].as_closure()
     }
@@ -123,15 +130,35 @@ impl VM {
     fn get_closed_value(&self, frame: &CallFrame, index: usize) -> Value {
         let closure = self.closure_deref(frame.closure_pointer);
         let value_ptr = closure.closed_values[index];
-        self.value_deref(value_ptr)
+        let obj = self.deref_internal(value_ptr);
+        match obj {
+            Object::OpenUpvalue(call_frame_idx, slot_idx) => {
+                let closure_frame = self.call_frames[*call_frame_idx];
+                self.read_stack(&closure_frame, *slot_idx)
+            }
+            Object::Value(value) => *value,
+            _ => panic!("Attempt to get closed value which is not an OpenUpvalue or Value type"),
+        }
     }
 
     #[inline]
     fn set_closed_value(&mut self, frame: &CallFrame, index: usize, value: Value) {
         let closure = self.closure_deref(frame.closure_pointer);
         let value_ptr = closure.closed_values[index];
+        let obj = self.deref_internal(value_ptr).clone(); //Only expensive in the case where we'll panic anyway...
 
-        self.heap.insert(value_ptr, Object::Value(value));
+        match obj {
+            Object::OpenUpvalue(call_frame_idx, slot_idx) => {
+                let closure_frame = self.call_frames[call_frame_idx];
+                self.write_stack(&closure_frame, slot_idx, value);
+            }
+            Object::Value(_) => {
+                self.heap.insert(value_ptr, Object::Value(value));
+            }
+            _ => {
+                panic!("Attempt to write to closed value which is not an OpenUpvalue or Value type")
+            }
+        }
     }
 
     #[inline]
@@ -270,10 +297,15 @@ impl VM {
             self.heap.insert(addr, object);
         }
     }
+
     fn add_to_heap(&mut self, object: Object) -> u64 {
         let new_address = self.next_addr();
         self.heap.insert(new_address, object);
         new_address
+    }
+
+    fn write_to_heap(&mut self, addr: u64, object: Object) {
+        self.heap.insert(addr, object);
     }
 
     fn read_stack(&self, frame: &CallFrame, offset: usize) -> Value {
@@ -323,11 +355,42 @@ impl VM {
         Ok((*frame, new_frame))
     }
 
+    fn search_captured_upvalue(&self, call_frame_idx: usize, slot: usize) -> Option<u64> {
+        if let Some((cf, s, ptr)) = self
+            .open_upvalues
+            .iter()
+            .find(|(cf, s, _)| *cf == call_frame_idx && *s == slot)
+        {
+            Some(*ptr)
+        } else {
+            None
+        }
+    }
+
+    fn remove_open_upvalue(&mut self, call_frame_idx: usize, slot: usize) -> u64 {
+        if let Some(idx) = self
+            .open_upvalues
+            .iter()
+            .position(|(cf, s, _)| *cf == call_frame_idx && *s == slot)
+        {
+            let (_, _, ptr) = self.open_upvalues.remove(idx);
+            ptr
+        } else {
+            panic!("Tried to remove open upvalue that doesn't exit!");
+        }
+    }
+
     fn capture_upvalue(&mut self, frame: &CallFrame, upvalue: Upvalue) -> u64 {
         if upvalue.is_local {
-            let value = self.read_stack(frame, upvalue.index);
-            let idx = self.add_to_heap(Object::Value(value));
-            idx
+            let call_frame_idx = self.call_frames.len(); //Use n+1 since the current frame is not added yet.
+            if let Some(ptr) = self.search_captured_upvalue(call_frame_idx, upvalue.index) {
+                ptr
+            } else {
+                let ptr = self.add_to_heap(Object::OpenUpvalue(call_frame_idx, upvalue.index));
+                self.open_upvalues
+                    .push((call_frame_idx, upvalue.index, ptr));
+                ptr
+            }
         } else {
             //Already captured?
             let parent_closure = self.closure_deref(frame.closure_pointer);
@@ -345,6 +408,25 @@ impl VM {
                     if self.call_frames.len() == 0 {
                         return Ok(());
                     }
+
+                    let mut to_open_upvalues: Vec<(usize, usize, u64)> = vec![];
+                    let mut to_remove: Vec<(usize, usize, u64)> = vec![];
+
+                    let call_frame_idx = self.call_frames.len();
+                    for (cf, s, ptr) in self.open_upvalues.iter() {
+                        if *cf == call_frame_idx {
+                            to_remove.push((*cf, *s, *ptr));
+                        } else {
+                            to_open_upvalues.push((*cf, *s, *ptr));
+                        }
+                    }
+
+                    for (_, s, ptr) in to_remove.iter() {
+                        let value = self.read_stack(&frame, *s);
+                        self.write_to_heap(*ptr, Object::Value(value));
+                    }
+
+                    self.open_upvalues = to_open_upvalues;
 
                     //Pop the function values off the stack.
                     while self.stack.len() > frame.stack_pointer {
@@ -528,6 +610,14 @@ impl VM {
                 }
                 OpCode::Upvalue(_) => {
                     panic!("Upvalue instruction should be handled by closure instruction")
+                }
+                OpCode::CloseUpvalue => {
+                    let value = self.pop();
+                    let call_frame_idx = self.call_frames.len();
+                    let slot = self.stack.len() - frame.stack_pointer;
+
+                    let ptr = self.remove_open_upvalue(call_frame_idx, slot);
+                    self.write_to_heap(ptr, Object::Value(value));
                 }
             }
         }

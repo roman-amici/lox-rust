@@ -30,8 +30,9 @@ pub enum Object {
     String(String),
     Function(Function),
     NativeFunction(String, fn(Vec<Value>) -> Result<Value, InterpreterError>),
-    Closure(Closure), //Reference to a function object
-    Value(Value),     //Box type
+    Closure(Closure),          //Reference to a function object
+    Value(Value),              //Box type
+    OpenUpvalue(usize, usize), //call_frame, slot
 }
 
 impl Object {
@@ -68,6 +69,9 @@ impl Display for Object {
             Object::NativeFunction(name, _) => write!(f, "<Native {}>", name),
             Object::Closure(closure) => write!(f, "<Closure {}>", closure.function_pointer),
             Object::Value(val) => write!(f, "{}", val),
+            Object::OpenUpvalue(call_frame, slot) => {
+                write!(f, "< cf: {}, slot : {}>", call_frame, slot)
+            }
         }
     }
 }

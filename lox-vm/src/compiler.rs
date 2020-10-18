@@ -61,6 +61,7 @@ struct Local {
     pub name: Token,
     pub depth: usize,
     pub initialized: bool,
+    pub captured: bool,
 }
 
 pub struct Compiler {
@@ -366,6 +367,7 @@ impl Compiler {
         } else if let Some(id) =
             Self::resolve_local(&self.code_scopes[code_scope_idx - 1], name, line)?
         {
+            self.code_scopes[code_scope_idx - 1].locals[id].captured = true;
             Ok(Some(Self::add_upvalue(
                 &mut self.code_scopes[code_scope_idx],
                 id,
@@ -590,7 +592,12 @@ impl Compiler {
             }
         } {
             let local = self.code_scope().locals.pop().unwrap();
-            self.chunk().append_chunk(OpCode::Pop, local.name.line);
+            if local.captured {
+                self.chunk()
+                    .append_chunk(OpCode::CloseUpvalue, local.name.line);
+            } else {
+                self.chunk().append_chunk(OpCode::Pop, local.name.line);
+            }
         }
     }
 
@@ -652,6 +659,7 @@ impl Compiler {
                 name: token.clone(),
                 depth: self.code_scope().depth,
                 initialized: false,
+                captured: false,
             };
             self.code_scope().locals.push(local);
             //I think shadowing is fine, so we won't look for duplicate id's

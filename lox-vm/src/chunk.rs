@@ -31,6 +31,7 @@ pub enum OpCode {
     Call(usize),
     Closure(usize, usize), // (Constant pointer, number of upvalues)
     Upvalue(Upvalue),
+    CloseUpvalue,
     EOF,
 }
 
