@@ -8,7 +8,6 @@ pub enum Value {
     Number(f64),
     Boolean(bool),
     Object(u64),
-    StrPtr(u64),
     Nil,
 }
 
@@ -18,7 +17,6 @@ impl Display for Value {
             Value::Number(n) => write!(f, "{} : Number", n),
             Value::Boolean(b) => write!(f, "{} : Boolean", b),
             Value::Nil => write!(f, "nil : Nil"),
-            Value::StrPtr(p) => write!(f, "{} : StrPtr", p),
             Value::Object(p) => write!(f, "{} : ObjectPtr", p),
         }
     }
@@ -57,6 +55,14 @@ impl Object {
             *v
         } else {
             panic!("Deref object is not a value");
+        }
+    }
+
+    pub fn as_string(&self) -> &String {
+        if let Object::String(s) = self {
+            s
+        } else {
+            panic!("Deref object is not a string");
         }
     }
 }

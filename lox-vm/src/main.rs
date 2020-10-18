@@ -48,17 +48,17 @@ fn run_prompt() {
 
 fn run(source: &String, interpreter: &mut interpreter::VM) {
     let tokens = scanner::scan_tokens(source).unwrap();
-    let mut compiler = compiler::Compiler::new(tokens);
-    if let Ok((main, new_strings, new_objects)) = compiler.compile() {
+    let mut compiler = compiler::Compiler::new(tokens, interpreter.take_virtual_memory());
+    if let Ok(main) = compiler.compile() {
+        let heap = compiler.heap;
         println!("{:?}", main.chunk.code);
-        for (_, obj) in new_objects.iter() {
-            if let value::Object::Function(f) = obj {
-                println!("{:?}", f.chunk.code);
-            }
-        }
-        if let Err(e) = interpreter.interpret(main, new_strings, new_objects) {
+
+        if let Err(e) = interpreter.interpret(main, heap) {
             println!("An error ocurred while interpreting");
             println!("Runtime Error: {}", e.to_string())
         }
-    };
+    } else {
+        let heap = compiler.heap;
+        interpreter.give_virtual_memory(heap);
+    }
 }

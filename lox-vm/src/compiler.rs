@@ -1,13 +1,10 @@
 use super::chunk::*;
+use super::interpreter::VirtualMemory;
 use super::token::*;
 use super::value::*;
 
 use num_enum::TryFromPrimitive;
-use rand::prelude::*;
-use rand::rngs::ThreadRng;
-use std::collections::hash_map::DefaultHasher;
 use std::convert::TryFrom;
-use std::hash::{Hash, Hasher};
 
 pub enum CompilerError {
     SyntaxError(String, usize),
@@ -70,9 +67,7 @@ pub struct Compiler {
     rules: Vec<ParseRule>,
     has_error: bool,
     code_scopes: Vec<CodeScope>,
-    new_strings: Vec<String>,
-    new_objects: Vec<(u64, Object)>,
-    rng: ThreadRng,
+    pub heap: VirtualMemory,
 }
 
 pub struct CodeScope {
@@ -83,7 +78,7 @@ pub struct CodeScope {
 }
 
 impl Compiler {
-    pub fn new(tokens: Vec<Token>) -> Compiler {
+    pub fn new(tokens: Vec<Token>, heap: VirtualMemory) -> Compiler {
         let scope = CodeScope {
             function: Function::new(String::from("main"), 0, FnType::Script),
             locals: vec![],
@@ -97,9 +92,7 @@ impl Compiler {
             rules: Compiler::build_parse_rules(),
             code_scopes: vec![scope],
             has_error: false,
-            new_strings: vec![],
-            new_objects: vec![],
-            rng: rand::thread_rng(),
+            heap,
         }
     }
 
@@ -232,7 +225,7 @@ impl Compiler {
         &self.tokens[self.current]
     }
 
-    pub fn is_at_end(&self) -> bool {
+    fn is_at_end(&self) -> bool {
         self.current >= self.tokens.len() || self.peek().token_type == TokenType::EOF
     }
 
@@ -331,18 +324,8 @@ impl Compiler {
         Ok(None)
     }
 
-    pub fn add_string(&mut self, s: String) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        s.hash(&mut hasher);
-        let hash_val = hasher.finish();
-        self.new_strings.push(s);
-        hash_val
-    }
-
-    pub fn add_object(&mut self, o: Object) -> u64 {
-        let addr = self.rng.next_u64(); //Horrible hack, I know. Fix with virtual memory later.
-        self.new_objects.push((addr, o));
-        addr
+    fn add_string(&mut self, s: String) -> u64 {
+        self.heap.add_to_heap(Object::String(s))
     }
 
     fn add_upvalue(code_scope: &mut CodeScope, index: usize, is_local: bool) -> usize {
@@ -398,8 +381,8 @@ impl Compiler {
         } else if let Some(id) = self.resolve_upvalue(self.code_scopes.len() - 1, &name, line)? {
             (OpCode::SetUpValue(id), OpCode::GetUpValue(id))
         } else {
-            let hash_value = self.add_string(name);
-            (OpCode::SetGlobal(hash_value), OpCode::GetGlobal(hash_value))
+            let str_ptr = self.add_string(name);
+            (OpCode::SetGlobal(str_ptr), OpCode::GetGlobal(str_ptr))
         };
 
         if can_assign && self.match_token(TokenType::Equal) {
@@ -534,8 +517,8 @@ impl Compiler {
             let str_value = token.literal.as_ref().unwrap().clone();
             (str_value, token.line)
         };
-        let hash_value = self.add_string(str_value);
-        let const_idx = self.chunk().add_constant(Value::StrPtr(hash_value));
+        let str_ptr = self.add_string(str_value);
+        let const_idx = self.chunk().add_constant(Value::Object(str_ptr));
         self.chunk().append_chunk(OpCode::Constant(const_idx), line);
         Ok(())
     }
@@ -675,18 +658,18 @@ impl Compiler {
         self.code_scope().locals.last_mut().unwrap().initialized = true;
     }
 
-    fn finish_define(&mut self, name_hash: u64, line: usize) {
+    fn finish_define(&mut self, str_ptr: u64, line: usize) {
         if self.code_scope().depth == 0 {
             //Only define globals at scope depth
             self.chunk()
-                .append_chunk(OpCode::DefineGlobal(name_hash), line);
+                .append_chunk(OpCode::DefineGlobal(str_ptr), line);
         } else {
             self.mark_initialized();
         }
     }
 
     fn var_declaration(&mut self) -> Result<(), CompilerError> {
-        let name_hash = self.parse_variable("Expected variable name.")?;
+        let str_ptr = self.parse_variable("Expected variable name.")?;
         let line = self.previous().line;
 
         if self.match_token(TokenType::Equal) {
@@ -701,7 +684,7 @@ impl Compiler {
         )?;
 
         //If global, define as global, if local, mark initialized
-        self.finish_define(name_hash, line);
+        self.finish_define(str_ptr, line);
 
         Ok(())
     }
@@ -724,10 +707,10 @@ impl Compiler {
                 self.code_scope().function.arity += 1;
                 //We can handle as much arity as possible!
 
-                let string_hash = self.parse_variable("Expected parameter name")?;
+                let str_ptr = self.parse_variable("Expected parameter name")?;
                 let line = self.previous().line;
 
-                self.finish_define(string_hash, line);
+                self.finish_define(str_ptr, line);
 
                 if !self.match_token(TokenType::Comma) {
                     break;
@@ -753,7 +736,9 @@ impl Compiler {
 
         let upvalue_count = function_scope.upvalues.len();
         function_scope.function.upvalue_count = upvalue_count;
-        let addr = self.add_object(Object::Function(function_scope.function));
+        let addr = self
+            .heap
+            .add_to_heap(Object::Function(function_scope.function));
         let c_addr = self.chunk().add_constant(Value::Object(addr));
         self.chunk()
             .append_chunk(OpCode::Closure(c_addr, upvalue_count), line);
@@ -766,12 +751,12 @@ impl Compiler {
     }
 
     fn fun_declaration(&mut self) -> Result<(), CompilerError> {
-        let name_hash = self.parse_variable("Expected function name")?;
+        let str_ptr = self.parse_variable("Expected function name")?;
         let line = self.peek().line;
 
         self.parse_function()?;
 
-        self.finish_define(name_hash, line);
+        self.finish_define(str_ptr, line);
 
         Ok(())
     }
@@ -976,7 +961,7 @@ impl Compiler {
         }
     }
 
-    pub fn compile(&mut self) -> Result<(Function, Vec<String>, Vec<(u64, Object)>), ()> {
+    pub fn compile(&mut self) -> Result<Function, ()> {
         let mut old_idx = self.current;
         while !self.is_at_end() {
             let result = self.declaration();
@@ -996,11 +981,9 @@ impl Compiler {
         if self.has_error {
             Err(())
         } else {
-            Ok((
-                self.code_scope().function.clone(),
-                self.new_strings.clone(),
-                self.new_objects.clone(),
-            ))
+            assert!(self.code_scopes.len() == 1);
+            let scope = self.code_scopes.pop().unwrap();
+            Ok(scope.function)
         }
     }
 }

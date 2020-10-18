@@ -3,6 +3,7 @@ use super::value::{Closure, FromValue, Function, Object, ToValue, Value};
 use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::mem::swap;
 
 pub enum InterpreterError {
     TypeError(usize, String),
@@ -29,12 +30,88 @@ pub struct CallFrame {
     stack_pointer: usize,
 }
 
+pub struct VirtualMemory {
+    pub heap: HashMap<u64, Object>,
+    pub next_addr: u64,
+}
+
+impl VirtualMemory {
+    pub fn new() -> VirtualMemory {
+        VirtualMemory {
+            heap: HashMap::new(),
+            next_addr: 0,
+        }
+    }
+
+    #[inline]
+    pub fn next_addr_inner(&mut self) -> Option<u64> {
+        while self.next_addr < u64::MAX {
+            if !self.heap.contains_key(&self.next_addr) {
+                let addr = self.next_addr;
+                self.next_addr += 1;
+                return Some(addr);
+            }
+            self.next_addr += 1;
+        }
+
+        None
+    }
+
+    pub fn next_addr(&mut self) -> u64 {
+        if let Some(addr) = self.next_addr_inner() {
+            addr
+        } else {
+            self.next_addr = 0;
+            if let Some(addr) = self.next_addr_inner() {
+                addr
+            } else {
+                panic!("Out of memory!");
+            }
+        }
+    }
+
+    #[inline]
+    pub fn add_to_heap(&mut self, object: Object) -> u64 {
+        let new_address = self.next_addr();
+        self.heap.insert(new_address, object);
+        new_address
+    }
+
+    #[inline]
+    pub fn deref(&self, ptr: u64) -> &Object {
+        &self.heap[&ptr]
+    }
+
+    #[inline]
+    fn closure_deref(&self, closure_p: u64) -> &Closure {
+        self.heap[&closure_p].as_closure()
+    }
+
+    #[inline]
+    fn value_deref(&self, value_ptr: u64) -> Value {
+        self.heap[&value_ptr].as_value()
+    }
+
+    #[inline]
+    fn write(&mut self, addr: u64, object: Object) {
+        self.heap.insert(addr, object);
+    }
+
+    #[inline]
+    fn function_deref(&self, fp: u64) -> &Function {
+        self.heap[&fp].as_function()
+    }
+
+    #[inline]
+    fn string_deref(&self, str_ptr: u64) -> &String {
+        self.heap[&str_ptr].as_string()
+    }
+}
+
 pub struct VM {
     stack: Vec<Value>,
-    heap: HashMap<u64, Object>,
-    next_addr: u64,
-    globals: HashMap<u64, Value>,
-    strings: HashMap<u64, String>,
+    virtual_memory: Option<VirtualMemory>,
+    globals: HashMap<String, Value>,
     //Never holds the active frame
     call_frames: Vec<CallFrame>,
     open_upvalues: Vec<(usize, usize, u64)>, //Nope, linear search.
@@ -44,47 +121,29 @@ impl VM {
     pub fn new() -> VM {
         VM {
             stack: vec![],
-            heap: HashMap::new(),
-            next_addr: 0,
+            virtual_memory: Some(VirtualMemory::new()),
             globals: HashMap::new(),
-            strings: HashMap::new(),
             call_frames: vec![],
             open_upvalues: vec![],
         }
     }
 
-    pub fn add_new_string(&mut self, s: String) -> u64 {
-        let mut hasher = DefaultHasher::new();
-        s.hash(&mut hasher);
-        let hash_val = hasher.finish();
-        if self.strings.contains_key(&hash_val) && self.strings[&hash_val] != s {
-            panic!("Hash collision!");
-        } else {
-            self.strings.insert(hash_val, s);
-        }
-
-        hash_val
+    pub fn take_virtual_memory(&mut self) -> VirtualMemory {
+        let mut spare = None;
+        swap(&mut spare, &mut self.virtual_memory);
+        spare.unwrap()
     }
 
-    pub fn next_addr(&mut self) -> u64 {
-        let addr = self.next_addr;
-        self.next_addr += 1;
-        addr
+    pub fn give_virtual_memory(&mut self, virtual_memory: VirtualMemory) {
+        self.virtual_memory = Some(virtual_memory);
     }
 
     pub fn interpret(
         &mut self,
         main: Function,
-        new_strings: Vec<String>,
-        new_objects: Vec<(u64, Object)>,
+        virtual_memory: VirtualMemory,
     ) -> Result<(), InterpreterError> {
-        for (addr, o) in new_objects {
-            self.add_to_heap_addr(addr, o);
-        }
-
-        for s in new_strings {
-            self.add_new_string(s);
-        }
+        self.virtual_memory = Some(virtual_memory);
 
         let fp = self.add_to_heap(Object::Function(main));
         let closure_p = self.add_to_heap(Object::Closure(Closure {
@@ -100,37 +159,20 @@ impl VM {
     }
 
     #[inline]
-    fn deref(&self, ptr: u64, line: usize) -> Result<&Object, InterpreterError> {
-        if self.heap.contains_key(&ptr) {
-            Ok(&self.heap[&ptr])
-        } else {
-            Err(InterpreterError::MemoryError(
-                line,
-                String::from("Invalid pointer dereference"),
-            ))
-        }
+    fn heap_mut(&mut self) -> &mut VirtualMemory {
+        self.virtual_memory.as_mut().unwrap()
     }
 
     #[inline]
-    fn deref_internal(&self, ptr: u64) -> &Object {
-        &self.heap[&ptr]
-    }
-
-    #[inline]
-    fn closure_deref(&self, closure_p: u64) -> &Closure {
-        self.heap[&closure_p].as_closure()
-    }
-
-    #[inline]
-    fn value_deref(&self, value_ptr: u64) -> Value {
-        self.heap[&value_ptr].as_value()
+    fn heap(&self) -> &VirtualMemory {
+        &self.virtual_memory.as_ref().unwrap()
     }
 
     #[inline]
     fn get_closed_value(&self, frame: &CallFrame, index: usize) -> Value {
-        let closure = self.closure_deref(frame.closure_pointer);
+        let closure = self.heap().closure_deref(frame.closure_pointer);
         let value_ptr = closure.closed_values[index];
-        let obj = self.deref_internal(value_ptr);
+        let obj = self.heap().deref(value_ptr);
         match obj {
             Object::OpenUpvalue(call_frame_idx, slot_idx) => {
                 let closure_frame = self.call_frames[*call_frame_idx];
@@ -143,9 +185,9 @@ impl VM {
 
     #[inline]
     fn set_closed_value(&mut self, frame: &CallFrame, index: usize, value: Value) {
-        let closure = self.closure_deref(frame.closure_pointer);
+        let closure = self.heap().closure_deref(frame.closure_pointer);
         let value_ptr = closure.closed_values[index];
-        let obj = self.deref_internal(value_ptr).clone(); //Only expensive in the case where we'll panic anyway...
+        let obj = self.heap().deref(value_ptr).clone(); //Only expensive in the case where we'll panic anyway...
 
         match obj {
             Object::OpenUpvalue(call_frame_idx, slot_idx) => {
@@ -153,7 +195,7 @@ impl VM {
                 self.write_stack(&closure_frame, slot_idx, value);
             }
             Object::Value(_) => {
-                self.heap.insert(value_ptr, Object::Value(value));
+                self.heap_mut().write(value_ptr, Object::Value(value));
             }
             _ => {
                 panic!("Attempt to write to closed value which is not an OpenUpvalue or Value type")
@@ -162,14 +204,9 @@ impl VM {
     }
 
     #[inline]
-    fn function_deref(&self, fp: u64) -> &Function {
-        self.heap[&fp].as_function()
-    }
-
-    #[inline]
     fn chunk(&self, closure_p: u64) -> &Chunk {
-        let fp = self.closure_deref(closure_p).function_pointer;
-        &self.function_deref(fp).chunk
+        let fp = self.heap().closure_deref(closure_p).function_pointer;
+        &self.heap().function_deref(fp).chunk
     }
 
     #[inline]
@@ -230,25 +267,28 @@ impl VM {
         Ok(())
     }
 
-    fn deref_str_ptr(&self, value: Value) -> Result<&String, InterpreterError> {
-        match value {
-            Value::StrPtr(p) => Ok(self.get_string(p)),
-            _ => Err(InterpreterError::TypeError(
-                0,
-                String::from("Impossible Error: Expected String"),
-            )),
+    fn deref_str_value(&self, value: Value) -> Result<&String, InterpreterError> {
+        if let Value::Object(ptr) = value {
+            if let Object::String(s) = self.heap().deref(ptr) {
+                return Ok(s);
+            }
         }
+
+        Err(InterpreterError::TypeError(
+            0,
+            String::from("Expected two strings for '+' operator"),
+        ))
     }
 
     fn string_concat(&mut self) -> Result<(), InterpreterError> {
         let b = self.pop();
         let a = self.pop();
-        let s_a = self.deref_str_ptr(a)?;
-        let s_b = self.deref_str_ptr(b)?;
+        let s_a = self.deref_str_value(a)?;
+        let s_b = self.deref_str_value(b)?;
 
         let s_c = format!("{}{}", s_a, s_b);
-        let p = self.add_new_string(s_c);
-        self.stack.push(Value::StrPtr(p));
+        let str_ptr = self.heap_mut().add_to_heap(Object::String(s_c));
+        self.stack.push(Value::Object(str_ptr));
         Ok(())
     }
 
@@ -257,10 +297,9 @@ impl VM {
             (Value::Boolean(ba), Value::Boolean(bb)) => ba == bb,
             (Value::Number(na), Value::Number(nb)) => na == nb,
             (Value::Nil, Value::Nil) => true,
-            (Value::StrPtr(p_a), Value::StrPtr(p_b)) => p_a == p_b,
             (Value::Object(p_a), Value::Object(p_b)) => {
-                let v_a = self.follow(p_a);
-                let v_b = self.follow(p_b);
+                let v_a = self.heap().deref(p_a);
+                let v_b = self.heap().deref(p_b);
                 match (v_a, v_b) {
                     (Object::String(s1), Object::String(s2)) => s1 == s2,
                     _ => false,
@@ -270,14 +309,9 @@ impl VM {
         }
     }
 
-    fn get_string(&self, p: u64) -> &String {
-        &self.strings[&p]
-    }
-
     fn print(&self, value: Value) {
         match value {
-            Value::Object(p) => println!("{}", self.follow(p)),
-            Value::StrPtr(p) => println!("{}", self.get_string(p)),
+            Value::Object(p) => println!("{}", self.heap().deref(p)),
             _ => println!("{}", value),
         }
     }
@@ -286,26 +320,9 @@ impl VM {
         &self.stack[self.stack.len() - 1 - look_back]
     }
 
-    fn follow(&self, pointer: u64) -> &Object {
-        &self.heap[&pointer]
-    }
-
-    fn add_to_heap_addr(&mut self, addr: u64, object: Object) {
-        if self.heap.contains_key(&addr) {
-            panic!("Heap collision for {}", addr);
-        } else {
-            self.heap.insert(addr, object);
-        }
-    }
-
+    #[inline]
     fn add_to_heap(&mut self, object: Object) -> u64 {
-        let new_address = self.next_addr();
-        self.heap.insert(new_address, object);
-        new_address
-    }
-
-    fn write_to_heap(&mut self, addr: u64, object: Object) {
-        self.heap.insert(addr, object);
+        self.heap_mut().add_to_heap(object)
     }
 
     fn read_stack(&self, frame: &CallFrame, offset: usize) -> Value {
@@ -324,7 +341,7 @@ impl VM {
         num_args: usize,
     ) -> Result<(CallFrame, CallFrame), InterpreterError> {
         let line = self.current_line(&frame);
-        let obj = self.deref(closure.function_pointer, line)?;
+        let obj = self.heap().deref(closure.function_pointer);
 
         let fun_def = if let Object::Function(fun_def) = obj {
             fun_def
@@ -393,7 +410,7 @@ impl VM {
             }
         } else {
             //Already captured?
-            let parent_closure = self.closure_deref(frame.closure_pointer);
+            let parent_closure = self.heap().closure_deref(frame.closure_pointer);
             parent_closure.closed_values[upvalue.index]
         }
     }
@@ -423,7 +440,7 @@ impl VM {
 
                     for (_, s, ptr) in to_remove.iter() {
                         let value = self.read_stack(&frame, *s);
-                        self.write_to_heap(*ptr, Object::Value(value));
+                        self.heap_mut().write(*ptr, Object::Value(value));
                     }
 
                     self.open_upvalues = to_open_upvalues;
@@ -461,7 +478,7 @@ impl VM {
                     let a = self.peek(0);
                     let b = self.peek(1);
                     match (a, b) {
-                        (Value::StrPtr(_), Value::StrPtr(_)) => {
+                        (Value::Object(_), Value::Object(_)) => {
                             self.string_concat()?;
                         }
                         _ => self.binary_op(&frame, |a: f64, b: f64| a + b)?,
@@ -498,29 +515,32 @@ impl VM {
                     self.binary_op(&frame, |a: f64, b: f64| a < b)?;
                 }
                 OpCode::DefineGlobal(name_ptr) => {
+                    let name = self.heap().string_deref(name_ptr).clone();
                     let value = self.pop();
-                    self.globals.insert(name_ptr, value);
+                    self.globals.insert(name, value);
                 }
                 OpCode::GetGlobal(name_ptr) => {
-                    if !self.globals.contains_key(&name_ptr) {
+                    let name = self.heap().string_deref(name_ptr);
+                    if !self.globals.contains_key(name) {
                         return Err(InterpreterError::NameError(
                             self.current_line(&frame),
-                            format!("Undefined variable {}", self.get_string(name_ptr)),
+                            format!("Undefined variable {}", name),
                         ));
                     } else {
-                        let value = self.globals[&name_ptr];
+                        let value = self.globals[name];
                         self.push(value);
                     }
                 }
                 OpCode::SetGlobal(name_ptr) => {
-                    if !self.globals.contains_key(&name_ptr) {
+                    let name = self.heap().string_deref(name_ptr);
+                    if !self.globals.contains_key(name) {
                         return Err(InterpreterError::NameError(
                             self.current_line(&frame),
-                            format!("Undefined variable {}", self.get_string(name_ptr)),
+                            format!("Undefined variable {}", name),
                         ));
                     } else {
                         let value = *self.peek(0);
-                        self.globals.insert(name_ptr, value);
+                        self.globals.insert(name.clone(), value);
                     }
                 }
                 OpCode::GetLocal(slot) => {
@@ -552,7 +572,7 @@ impl VM {
                             String::from("Attempt to call a value which is not a function"),
                         ));
                     };
-                    let obj = self.deref(obj_ptr, line)?;
+                    let obj = self.heap().deref(obj_ptr);
 
                     match obj {
                         Object::NativeFunction(_, body) => {
@@ -617,7 +637,7 @@ impl VM {
                     let slot = self.stack.len() - frame.stack_pointer;
 
                     let ptr = self.remove_open_upvalue(call_frame_idx, slot);
-                    self.write_to_heap(ptr, Object::Value(value));
+                    self.heap_mut().write(ptr, Object::Value(value));
                 }
             }
         }
