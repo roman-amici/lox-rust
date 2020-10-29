@@ -382,7 +382,8 @@ impl Compiler {
             (OpCode::SetUpValue(id), OpCode::GetUpValue(id))
         } else {
             let str_ptr = self.add_string(name);
-            (OpCode::SetGlobal(str_ptr), OpCode::GetGlobal(str_ptr))
+            let str_idx = self.chunk().add_constant(Value::Object(str_ptr));
+            (OpCode::SetGlobal(str_idx), OpCode::GetGlobal(str_idx))
         };
 
         if can_assign && self.match_token(TokenType::Equal) {
@@ -661,8 +662,9 @@ impl Compiler {
     fn finish_define(&mut self, str_ptr: u64, line: usize) {
         if self.code_scope().depth == 0 {
             //Only define globals at scope depth
+            let str_idx = self.chunk().add_constant(Value::Object(str_ptr));
             self.chunk()
-                .append_chunk(OpCode::DefineGlobal(str_ptr), line);
+                .append_chunk(OpCode::DefineGlobal(str_idx), line);
         } else {
             self.mark_initialized();
         }
@@ -905,7 +907,7 @@ impl Compiler {
         Ok(arg_count)
     }
 
-    fn call(&mut self, _can_Assign: bool) -> Result<(), CompilerError> {
+    fn call(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
         let arg_count = self.argument_list()?;
         let line = self.previous().line;
         self.chunk().append_chunk(OpCode::Call(arg_count), line);

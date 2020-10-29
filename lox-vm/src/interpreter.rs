@@ -1,15 +1,12 @@
 use super::chunk::*;
 use super::value::{Closure, FromValue, Function, Object, ToValue, Value};
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
 use std::mem::swap;
 
 pub enum InterpreterError {
     TypeError(usize, String),
     NameError(usize, String),
     FunctionError(usize, String),
-    MemoryError(usize, String),
 }
 
 impl InterpreterError {
@@ -17,10 +14,17 @@ impl InterpreterError {
         match self {
             InterpreterError::TypeError(line, msg)
             | InterpreterError::NameError(line, msg)
-            | InterpreterError::FunctionError(line, msg)
-            | InterpreterError::MemoryError(line, msg) => format!("{}: {}", line, msg),
+            | InterpreterError::FunctionError(line, msg) => format!("{}: {}", line, msg),
         }
     }
+}
+
+//const gc_allocations: u64 = 500;
+const gc_allocations: u64 = 5; //Stress the garbage collector
+
+pub enum GCMark {
+    Started,
+    Complete,
 }
 
 #[derive(Clone, Copy)]
@@ -33,6 +37,7 @@ pub struct CallFrame {
 pub struct VirtualMemory {
     pub heap: HashMap<u64, Object>,
     pub next_addr: u64,
+    pub allocations: u64,
 }
 
 impl VirtualMemory {
@@ -40,6 +45,7 @@ impl VirtualMemory {
         VirtualMemory {
             heap: HashMap::new(),
             next_addr: 0,
+            allocations: 0,
         }
     }
 
@@ -72,9 +78,15 @@ impl VirtualMemory {
 
     #[inline]
     pub fn add_to_heap(&mut self, object: Object) -> u64 {
+        self.allocations += 1;
         let new_address = self.next_addr();
         self.heap.insert(new_address, object);
         new_address
+    }
+
+    #[inline]
+    pub fn remove_from_heap(&mut self, addr: u64) {
+        self.heap.remove(&addr);
     }
 
     #[inline]
@@ -156,6 +168,114 @@ impl VM {
             stack_pointer: 0,
         }); //Will be immediately popped when run is called.
         self.run()
+    }
+
+    fn mark_object_started(gc_marks: &mut HashMap<u64, GCMark>, ptr: u64) -> bool {
+        if !gc_marks.contains_key(&ptr) {
+            gc_marks.insert(ptr, GCMark::Started);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn mark_stack(&mut self, gc_marks: &mut HashMap<u64, GCMark>) {
+        for value in self.stack.iter() {
+            if let Value::Object(ptr) = value {
+                Self::mark_object_started(gc_marks, *ptr);
+            }
+        }
+    }
+
+    fn mark_globals(&self, gc_marks: &mut HashMap<u64, GCMark>) {
+        for val in self.globals.values() {
+            if let Value::Object(ptr) = val {
+                Self::mark_object_started(gc_marks, *ptr);
+            }
+        }
+    }
+
+    fn mark_callframes(&mut self, current_frame: &CallFrame, gc_marks: &mut HashMap<u64, GCMark>) {
+        Self::mark_object_started(gc_marks, current_frame.closure_pointer);
+
+        for frame in self.call_frames.iter() {
+            Self::mark_object_started(gc_marks, frame.closure_pointer);
+        }
+    }
+
+    #[inline]
+    fn add_to_worklist(gc_marks: &mut HashMap<u64, GCMark>, worklist: &mut Vec<u64>, ptr: u64) {
+        if Self::mark_object_started(gc_marks, ptr) {
+            worklist.push(ptr);
+        }
+    }
+
+    fn mark_object(&self, gc_marks: &mut HashMap<u64, GCMark>, worklist: &mut Vec<u64>, ptr: u64) {
+        let object = self.heap().deref(ptr);
+        match object {
+            Object::Closure(closure) => {
+                Self::add_to_worklist(gc_marks, worklist, closure.function_pointer);
+                for closed_ptr in closure.closed_values.iter() {
+                    Self::add_to_worklist(gc_marks, worklist, *closed_ptr);
+                }
+            }
+            Object::Value(val) => {
+                if let Value::Object(obj_ptr) = val {
+                    Self::add_to_worklist(gc_marks, worklist, *obj_ptr);
+                }
+            }
+            Object::Function(fun) => {
+                for value in fun.chunk.constants.iter() {
+                    if let Value::Object(obj_ptr) = value {
+                        Self::add_to_worklist(gc_marks, worklist, *obj_ptr)
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn sweep(&mut self, gc_marks: &HashMap<u64, GCMark>) {
+        let mut to_remove: Vec<u64> = vec![];
+        for ptr in self.heap().heap.keys() {
+            if !gc_marks.contains_key(ptr) {
+                to_remove.push(*ptr);
+            }
+        }
+        for ptr in to_remove.iter() {
+            println!("Removing {}", self.heap().deref(*ptr));
+            self.heap_mut().remove_from_heap(*ptr);
+        }
+    }
+
+    fn collect_garbage(&mut self, current_frame: &CallFrame) {
+        let mut gc_marks: HashMap<u64, GCMark> = HashMap::new();
+
+        self.mark_stack(&mut gc_marks);
+        self.mark_globals(&mut gc_marks);
+        self.mark_callframes(current_frame, &mut gc_marks);
+
+        let mut worklist: Vec<u64> = gc_marks.iter().map(|(k, _)| *k).collect();
+
+        while worklist.len() > 0 {
+            let ptr = worklist.pop().unwrap();
+            if let GCMark::Started = gc_marks[&ptr] {
+                self.mark_object(&mut gc_marks, &mut worklist, ptr);
+                gc_marks.insert(ptr, GCMark::Complete);
+            }
+        }
+
+        self.sweep(&gc_marks);
+
+        self.heap_mut().allocations = 0;
+    }
+
+    fn should_run_gc(&self) -> bool {
+        if self.heap().allocations > gc_allocations {
+            true
+        } else {
+            false
+        }
     }
 
     #[inline]
@@ -373,7 +493,7 @@ impl VM {
     }
 
     fn search_captured_upvalue(&self, call_frame_idx: usize, slot: usize) -> Option<u64> {
-        if let Some((cf, s, ptr)) = self
+        if let Some((_cf, _s, ptr)) = self
             .open_upvalues
             .iter()
             .find(|(cf, s, _)| *cf == call_frame_idx && *s == slot)
@@ -418,6 +538,10 @@ impl VM {
     fn run(&mut self) -> Result<(), InterpreterError> {
         let mut frame = self.call_frames.pop().unwrap();
         loop {
+            if self.should_run_gc() {
+                self.collect_garbage(&frame);
+            }
+
             match self.consume(&mut frame) {
                 OpCode::EOF => return Ok(()),
                 OpCode::Return => {
@@ -514,12 +638,24 @@ impl VM {
                 OpCode::Less => {
                     self.binary_op(&frame, |a: f64, b: f64| a < b)?;
                 }
-                OpCode::DefineGlobal(name_ptr) => {
+                OpCode::DefineGlobal(string_idx) => {
+                    let name_ptr =
+                        if let Value::Object(ptr) = self.read_constant(&frame, string_idx) {
+                            ptr
+                        } else {
+                            panic!("Expected object.")
+                        };
                     let name = self.heap().string_deref(name_ptr).clone();
                     let value = self.pop();
                     self.globals.insert(name, value);
                 }
-                OpCode::GetGlobal(name_ptr) => {
+                OpCode::GetGlobal(string_idx) => {
+                    let name_ptr =
+                        if let Value::Object(ptr) = self.read_constant(&frame, string_idx) {
+                            ptr
+                        } else {
+                            panic!("Expected object.")
+                        };
                     let name = self.heap().string_deref(name_ptr);
                     if !self.globals.contains_key(name) {
                         return Err(InterpreterError::NameError(
@@ -531,16 +667,22 @@ impl VM {
                         self.push(value);
                     }
                 }
-                OpCode::SetGlobal(name_ptr) => {
-                    let name = self.heap().string_deref(name_ptr);
-                    if !self.globals.contains_key(name) {
+                OpCode::SetGlobal(string_idx) => {
+                    let name_ptr =
+                        if let Value::Object(ptr) = self.read_constant(&frame, string_idx) {
+                            ptr
+                        } else {
+                            panic!("Expected object.")
+                        };
+                    let name = self.heap().string_deref(name_ptr).clone();
+                    if !self.globals.contains_key(&name) {
                         return Err(InterpreterError::NameError(
                             self.current_line(&frame),
                             format!("Undefined variable {}", name),
                         ));
                     } else {
                         let value = *self.peek(0);
-                        self.globals.insert(name.clone(), value);
+                        self.globals.insert(name, value);
                     }
                 }
                 OpCode::GetLocal(slot) => {

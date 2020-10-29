@@ -93,14 +93,6 @@ impl LexicalScanner {
         }
     }
 
-    pub fn peek_prev(&self) -> char {
-        if self.current != 0 {
-            self.source_chars[self.current - 1]
-        } else {
-            '\0'
-        }
-    }
-
     pub fn consume_whitespace(&mut self) {
         self.start = self.current;
     }

@@ -3,7 +3,7 @@ use super::value::Value;
 #[derive(Debug, Copy, Clone)]
 pub enum OpCode {
     Constant(usize), //Index into the constants array
-    DefineGlobal(u64),
+    DefineGlobal(usize),
     Nil,
     True,
     False,
@@ -19,8 +19,8 @@ pub enum OpCode {
     Equal,
     Greater,
     Less,
-    GetGlobal(u64),
-    SetGlobal(u64),
+    GetGlobal(usize),
+    SetGlobal(usize),
     SetLocal(usize),
     GetLocal(usize),
     GetUpValue(usize),
