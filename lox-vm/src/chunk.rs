@@ -30,7 +30,10 @@ pub enum OpCode {
     Loop(usize), //Backwards offset instead of forward
     Call(usize),
     Closure(usize, usize), // (Constant pointer, number of upvalues)
+    Class(usize),
     Upvalue(Upvalue),
+    SetProperty(usize), //Constant index for name
+    GetProperty(usize),
     CloseUpvalue,
     EOF,
 }

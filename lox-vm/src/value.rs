@@ -1,5 +1,6 @@
 use super::chunk::Chunk;
 use super::interpreter::InterpreterError;
+use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
@@ -31,6 +32,8 @@ pub enum Object {
     Closure(Closure),          //Reference to a function object
     Value(Value),              //Box type
     OpenUpvalue(usize, usize), //call_frame, slot
+    Class(Class),
+    Instance(Instance),
 }
 
 impl Object {
@@ -78,6 +81,8 @@ impl Display for Object {
             Object::OpenUpvalue(call_frame, slot) => {
                 write!(f, "< cf: {}, slot : {}>", call_frame, slot)
             }
+            Object::Class(class) => write!(f, "<class {}>", class.name),
+            Object::Instance(_) => write!(f, "<Object>"),
         }
     }
 }
@@ -117,6 +122,17 @@ impl Function {
     pub fn to_string(&self) -> String {
         format!("<fn {}(args[{}])>", self.name, self.arity)
     }
+}
+
+#[derive(Clone)]
+pub struct Class {
+    pub name: String,
+}
+
+#[derive(Clone)]
+pub struct Instance {
+    pub class_ptr: u64,
+    pub fields: HashMap<String, Value>,
 }
 
 pub trait FromValue

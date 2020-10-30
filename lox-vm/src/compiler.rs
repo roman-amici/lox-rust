@@ -210,6 +210,11 @@ impl Compiler {
                     infix: Some(Compiler::or),
                     precedence: Precedence::Or,
                 }),
+                TokenType::Dot => rules.push(ParseRule {
+                    prefix: None,
+                    infix: Some(Compiler::dot),
+                    precedence: Precedence::Call,
+                }),
                 _ => rules.push(ParseRule {
                     prefix: None,
                     infix: None,
@@ -763,8 +768,25 @@ impl Compiler {
         Ok(())
     }
 
+    fn class_declaration(&mut self) -> Result<(), CompilerError> {
+        let name_addr = self.parse_variable("Expected class name")?;
+        let offset = self.chunk().add_constant(Value::Object(name_addr));
+        let line = self.previous().line;
+
+        self.chunk().append_chunk(OpCode::Class(offset), line);
+        self.finish_define(name_addr, line);
+
+        self.try_consume(TokenType::LeftBrace, "Expected '{' before class body")?;
+        //Parse methods
+        self.try_consume(TokenType::RightBrace, "Expected '}' after class body")?;
+
+        Ok(())
+    }
+
     fn declaration(&mut self) -> Result<(), CompilerError> {
-        if self.match_token(TokenType::Var) {
+        if self.match_token(TokenType::Class) {
+            self.class_declaration()
+        } else if self.match_token(TokenType::Var) {
             self.var_declaration()
         } else if self.match_token(TokenType::Fun) {
             self.fun_declaration()
@@ -905,6 +927,22 @@ impl Compiler {
 
         self.try_consume(TokenType::RightParen, "Expected ')' after arguments.")?;
         Ok(arg_count)
+    }
+
+    fn dot(&mut self, can_assign: bool) -> Result<(), CompilerError> {
+        let token = self.try_consume(TokenType::Identifier, "Expect property name after '.'.")?;
+        let line = token.line;
+        let ptr = self.heap.add_to_heap(Object::String(token.lexeme.clone()));
+        let index = self.chunk().add_constant(Value::Object(ptr));
+
+        if can_assign && self.match_token(TokenType::Equal) {
+            self.expression()?;
+            self.chunk().append_chunk(OpCode::SetProperty(index), line);
+        } else {
+            self.chunk().append_chunk(OpCode::GetProperty(index), line);
+        }
+
+        Ok(())
     }
 
     fn call(&mut self, _can_assign: bool) -> Result<(), CompilerError> {

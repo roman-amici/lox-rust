@@ -1,5 +1,5 @@
 use super::chunk::*;
-use super::value::{Closure, FromValue, Function, Object, ToValue, Value};
+use super::value::{Class, Closure, FromValue, Function, Instance, Object, ToValue, Value};
 use std::collections::HashMap;
 use std::mem::swap;
 
@@ -19,9 +19,6 @@ impl InterpreterError {
     }
 }
 
-//const gc_allocations: u64 = 500;
-const gc_allocations: u64 = 5; //Stress the garbage collector
-
 pub enum GCMark {
     Started,
     Complete,
@@ -38,14 +35,17 @@ pub struct VirtualMemory {
     pub heap: HashMap<u64, Object>,
     pub next_addr: u64,
     pub allocations: u64,
+    pub max_allocations: u64,
 }
 
 impl VirtualMemory {
     pub fn new() -> VirtualMemory {
+        let max_allocations = if cfg!(test_gc) { 5 } else { 500 };
         VirtualMemory {
             heap: HashMap::new(),
             next_addr: 0,
             allocations: 0,
+            max_allocations,
         }
     }
 
@@ -92,6 +92,11 @@ impl VirtualMemory {
     #[inline]
     pub fn deref(&self, ptr: u64) -> &Object {
         &self.heap[&ptr]
+    }
+
+    #[inline]
+    pub fn deref_mut(&mut self, ptr: u64) -> &mut Object {
+        self.heap.get_mut(&ptr).unwrap()
     }
 
     #[inline]
@@ -231,6 +236,14 @@ impl VM {
                     }
                 }
             }
+            Object::Instance(instance) => {
+                Self::add_to_worklist(gc_marks, worklist, instance.class_ptr);
+                for value in instance.fields.values() {
+                    if let Value::Object(obj_ptr) = value {
+                        Self::add_to_worklist(gc_marks, worklist, *obj_ptr);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -243,7 +256,10 @@ impl VM {
             }
         }
         for ptr in to_remove.iter() {
-            println!("Removing {}", self.heap().deref(*ptr));
+            if cfg!(test_gc) {
+                println!("Removing {}", self.heap().deref(*ptr));
+            }
+
             self.heap_mut().remove_from_heap(*ptr);
         }
     }
@@ -271,7 +287,7 @@ impl VM {
     }
 
     fn should_run_gc(&self) -> bool {
-        if self.heap().allocations > gc_allocations {
+        if self.heap().allocations > self.heap().max_allocations {
             true
         } else {
             false
@@ -734,6 +750,14 @@ impl VM {
                             self.call_frames.push(old_frame);
                             frame = new_frame;
                         }
+                        Object::Class(class) => {
+                            let obj_instance = Object::Instance(Instance {
+                                class_ptr: obj_ptr,
+                                fields: HashMap::new(),
+                            });
+                            let addr = self.add_to_heap(obj_instance);
+                            self.push(Value::Object(addr));
+                        }
                         _ => {
                             println!("{}", obj);
                             return Err(InterpreterError::FunctionError(
@@ -780,6 +804,80 @@ impl VM {
 
                     let ptr = self.remove_open_upvalue(call_frame_idx, slot);
                     self.heap_mut().write(ptr, Object::Value(value));
+                }
+                OpCode::Class(const_idx) => {
+                    let value = self.read_constant(&frame, const_idx);
+                    if let Value::Object(ptr) = value {
+                        let name = self.heap().string_deref(ptr).clone();
+                        let new_class = Object::Class(Class { name });
+                        let addr = self.add_to_heap(new_class);
+                        self.push(Value::Object(addr));
+                    } else {
+                        panic!("Expected object.");
+                    }
+                }
+                OpCode::GetProperty(const_idx) => {
+                    let line = self.current_line(&frame);
+                    let name_ptr =
+                        if let Value::Object(name_ptr) = self.read_constant(&frame, const_idx) {
+                            name_ptr
+                        } else {
+                            panic!("Expected object");
+                        };
+                    let name = self.heap().string_deref(name_ptr).clone(); //Can we eliminate this clone?
+
+                    let value = self.pop();
+                    let instance_ptr = if let Value::Object(ptr) = value {
+                        ptr
+                    } else {
+                        panic!("Expected object");
+                    };
+                    let object = self.heap().deref(instance_ptr);
+                    if let Object::Instance(instance) = object {
+                        let value = if let Some(value) = instance.fields.get(&name) {
+                            *value
+                        } else {
+                            return Err(InterpreterError::NameError(
+                                line,
+                                format!("Undefined property {}", name),
+                            ));
+                        };
+                        self.push(value);
+                    } else {
+                        return Err(InterpreterError::TypeError(
+                            line,
+                            format!("Attempted to access field {}, but target was not an instance of an object", name),
+                        ));
+                    }
+                }
+                OpCode::SetProperty(const_idx) => {
+                    let line = self.current_line(&frame);
+                    let name_ptr =
+                        if let Value::Object(name_ptr) = self.read_constant(&frame, const_idx) {
+                            name_ptr
+                        } else {
+                            panic!("Expected object");
+                        };
+                    let name = self.heap().string_deref(name_ptr).clone(); //Can we eliminate this clone?
+
+                    let value_set = self.pop();
+
+                    let instance_value = self.pop();
+                    let instance_ptr = if let Value::Object(ptr) = instance_value {
+                        ptr
+                    } else {
+                        panic!("Expected object");
+                    };
+                    let object = self.heap_mut().deref_mut(instance_ptr);
+                    if let Object::Instance(instance) = object {
+                        instance.fields.insert(name, value_set);
+                        self.push(value_set);
+                    } else {
+                        return Err(InterpreterError::TypeError(
+                            line,
+                            format!("Attempted to access field {}, but target was not an instance of an object", name),
+                        ));
+                    }
                 }
             }
         }
