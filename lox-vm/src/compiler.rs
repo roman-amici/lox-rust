@@ -67,7 +67,12 @@ pub struct Compiler {
     rules: Vec<ParseRule>,
     has_error: bool,
     code_scopes: Vec<CodeScope>,
+    class_scopes: Vec<ClassScope>,
     pub heap: VirtualMemory,
+}
+
+pub struct ClassScope {
+    name: Token,
 }
 
 pub struct CodeScope {
@@ -91,6 +96,7 @@ impl Compiler {
             current: 0,
             rules: Compiler::build_parse_rules(),
             code_scopes: vec![scope],
+            class_scopes: vec![],
             has_error: false,
             heap,
         }
@@ -614,9 +620,15 @@ impl Compiler {
     fn return_statement(&mut self) -> Result<(), CompilerError> {
         let line = self.previous().line;
 
-        if let FnType::Script = self.code_scope().function.fn_type {
+        let fn_type = self.code_scope().function.fn_type;
+        if fn_type == FnType::Script {
             return Err(CompilerError::SyntaxError(
                 String::from("Can't return from top-level code."),
+                line,
+            ));
+        } else if fn_type == FnType::Initializer {
+            return Err(CompilerError::SyntaxError(
+                String::from("Can't return from within an initializer"),
                 line,
             ));
         }
@@ -721,7 +733,7 @@ impl Compiler {
         self.begin_scope();
         self.try_consume(TokenType::LeftParen, "Expected '(' after function name.")?;
 
-        let this_name = if let FnType::Method = fn_type {
+        let this_name = if FnType::Method == fn_type || FnType::Initializer == fn_type {
             "this"
         } else {
             ""
@@ -761,9 +773,14 @@ impl Compiler {
         self.try_consume(TokenType::LeftBrace, "Expected '{' before function body.")?;
         self.block()?;
 
-        //return nil if we fall off the end of the function
         let line = self.peek().line;
-        self.chunk().append_chunk(OpCode::Nil, line);
+        if fn_type == FnType::Initializer {
+            //Return this at the end of an initializer
+            self.chunk().append_chunk(OpCode::GetLocal(0), line);
+        } else {
+            //return nil if we fall off the end of the function
+            self.chunk().append_chunk(OpCode::Nil, line);
+        }
         self.chunk().append_chunk(OpCode::Return, line);
 
         let mut function_scope = self.code_scopes.pop().unwrap();
@@ -800,10 +817,15 @@ impl Compiler {
         let token = self.try_consume(TokenType::Identifier, "Expected method name.")?;
 
         let method_name = token.lexeme.clone();
+        let fn_type = if method_name == "init" {
+            FnType::Initializer
+        } else {
+            FnType::Method
+        };
+
         let addr = self.heap.add_to_heap(Object::String(method_name));
         let constant_idx = self.chunk().add_constant(Value::Object(addr));
-
-        self.parse_function(FnType::Method)?;
+        self.parse_function(fn_type)?;
 
         self.chunk()
             .append_chunk(OpCode::Method(constant_idx), token.line);
@@ -812,12 +834,24 @@ impl Compiler {
     }
 
     fn this(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
-        self.variable(false)
+        if self.class_scopes.len() == 0 {
+            let line = self.previous().line;
+            Err(CompilerError::SyntaxError(
+                String::from("Can't use 'this' outside of a class"),
+                line,
+            ))
+        } else {
+            self.variable(false)
+        }
     }
 
     fn class_declaration(&mut self) -> Result<(), CompilerError> {
         let name_addr = self.parse_variable("Expected class name")?;
-        let name = self.previous().lexeme.clone();
+
+        let token = self.previous().clone();
+        let name = token.lexeme.clone();
+        self.class_scopes.push(ClassScope { name: token });
+
         let offset = self.chunk().add_constant(Value::Object(name_addr));
         let line = self.previous().line;
 
@@ -835,6 +869,8 @@ impl Compiler {
 
         //Pop the named reference to the variable off the stack
         self.chunk().append_chunk(OpCode::Pop, line);
+
+        self.class_scopes.pop();
 
         Ok(())
     }
@@ -995,6 +1031,11 @@ impl Compiler {
         if can_assign && self.match_token(TokenType::Equal) {
             self.expression()?;
             self.chunk().append_chunk(OpCode::SetProperty(index), line);
+        } else if self.match_token(TokenType::LeftParen) {
+            //Method invocation
+            let arg_count = self.argument_list()?;
+            self.chunk()
+                .append_chunk(OpCode::Invoke(index, arg_count), line);
         } else {
             self.chunk().append_chunk(OpCode::GetProperty(index), line);
         }

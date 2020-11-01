@@ -568,6 +568,78 @@ impl VM {
         }
     }
 
+    fn call_object(
+        &mut self,
+        frame: &mut CallFrame,
+        num_args: usize,
+        obj_ptr: u64,
+    ) -> Result<CallFrame, InterpreterError> {
+        let line = self.current_line(frame);
+        let obj = self.heap().deref(obj_ptr);
+
+        match obj {
+            Object::NativeFunction(_, body) => {
+                let body = *body;
+                let mut native_call_stack: Vec<Value> = vec![];
+                for _ in 0..num_args {
+                    let value = self.pop();
+                    native_call_stack.push(value);
+                }
+                let result = body(native_call_stack)?;
+                self.push(result);
+                Ok(*frame)
+            }
+            Object::Closure(closure) => {
+                //Todo: upvalues
+                let (old_frame, new_frame) =
+                    self.call_lox_function(&frame, &closure, obj_ptr, num_args)?;
+                self.call_frames.push(old_frame);
+                Ok(new_frame)
+            }
+            Object::Class(class) => {
+                let obj_instance = Object::Instance(Instance {
+                    class_ptr: obj_ptr,
+                    fields: HashMap::new(),
+                });
+                let init_addr = class.methods.get(&String::from("init")).copied();
+                let addr = self.add_to_heap(obj_instance);
+                if let Some(closure_addr) = init_addr {
+                    let closure = self.heap().closure_deref(closure_addr);
+                    let (old_frame, new_frame) =
+                        self.call_lox_function(&frame, closure, closure_addr, num_args)?;
+                    self.call_frames.push(old_frame);
+                    self.write_stack(&new_frame, 0, Value::Object(addr));
+                    Ok(new_frame)
+                } else if num_args != 0 {
+                    return Err(InterpreterError::FunctionError(
+                        line,
+                        format!("Expected 0 arguments but go {}", num_args),
+                    ));
+                } else {
+                    self.pop(); //Remove the the ThisPlaceholder
+                    self.push(Value::Object(addr));
+                    Ok(*frame)
+                }
+            }
+            Object::BoundMethod(bound_method) => {
+                let closure_ptr = bound_method.closure_ptr;
+                let closure = self.heap().closure_deref(closure_ptr);
+                let receiver = bound_method.receiver; //Copy here to drop the ref to bound_method
+                let (old_frame, new_frame) =
+                    self.call_lox_function(&frame, closure, closure_ptr, num_args)?;
+                self.call_frames.push(old_frame);
+                self.write_stack(&new_frame, 0, receiver);
+                Ok(new_frame)
+            }
+            _ => {
+                return Err(InterpreterError::FunctionError(
+                    line,
+                    String::from("Attempted to call an object that's not callable"),
+                ));
+            }
+        }
+    }
+
     fn run(&mut self) -> Result<(), InterpreterError> {
         let mut frame = self.call_frames.pop().unwrap();
         loop {
@@ -732,53 +804,8 @@ impl VM {
                             String::from("Attempt to call a value which is not a function"),
                         ));
                     };
-                    let obj = self.heap().deref(obj_ptr);
 
-                    match obj {
-                        Object::NativeFunction(_, body) => {
-                            let body = *body;
-                            let mut native_call_stack: Vec<Value> = vec![];
-                            for _ in 0..num_args {
-                                let value = self.pop();
-                                native_call_stack.push(value);
-                            }
-                            let result = body(native_call_stack)?;
-                            self.push(result);
-                        }
-                        Object::Closure(closure) => {
-                            //Todo: upvalues
-                            let (old_frame, new_frame) =
-                                self.call_lox_function(&frame, &closure, obj_ptr, num_args)?;
-                            self.call_frames.push(old_frame);
-                            frame = new_frame;
-                        }
-                        Object::Class(_) => {
-                            let obj_instance = Object::Instance(Instance {
-                                class_ptr: obj_ptr,
-                                fields: HashMap::new(),
-                            });
-                            let addr = self.add_to_heap(obj_instance);
-                            self.pop(); //This
-                            self.push(Value::Object(addr));
-                        }
-                        Object::BoundMethod(bound_method) => {
-                            let closure_ptr = bound_method.closure_ptr;
-                            let closure = self.heap().closure_deref(closure_ptr);
-                            let receiver = bound_method.receiver; //Copy here to drop the ref to bound_method
-                            let (old_frame, new_frame) =
-                                self.call_lox_function(&frame, closure, closure_ptr, num_args)?;
-                            self.call_frames.push(old_frame);
-                            frame = new_frame;
-                            self.write_stack(&frame, 0, receiver);
-                        }
-                        _ => {
-                            println!("{}", obj);
-                            return Err(InterpreterError::FunctionError(
-                                line,
-                                String::from("Attempted to call an object that's not callable"),
-                            ));
-                        }
-                    }
+                    frame = self.call_object(&mut frame, num_args, obj_ptr)?;
                 }
                 OpCode::Closure(idx, num_upvalues) => {
                     if let Value::Object(function_pointer) = self.read_constant(&frame, idx) {
@@ -903,6 +930,51 @@ impl VM {
                 }
                 OpCode::ThisPlaceholder => {
                     self.push(Value::Nil);
+                }
+                OpCode::Invoke(const_idx, num_args) => {
+                    let line = self.current_line(&frame);
+                    let string_ptr = u64::as_val_or_panic(self.read_constant(&frame, const_idx));
+                    let method_name = self.heap().string_deref(string_ptr).clone();
+
+                    let receiver_ptr = u64::as_val_or_panic(*self.peek(num_args + 1));
+                    let receiver = self.heap().deref(receiver_ptr);
+
+                    if let Object::Instance(instance) = receiver {
+                        let class = self.heap().class_deref(instance.class_ptr);
+                        let method_ptr = class.methods.get(&method_name).copied();
+                        if let Some(method_ptr) = method_ptr {
+                            let closure = self.heap().closure_deref(method_ptr);
+                            let (old_frame, new_frame) =
+                                self.call_lox_function(&frame, &closure, method_ptr, num_args)?;
+                            self.call_frames.push(old_frame);
+                            frame = new_frame;
+                            self.write_stack(&frame, 0, Value::Object(receiver_ptr));
+                        } else {
+                            let field = instance.fields.get(&method_name).copied();
+                            if let Some(field) = field {
+                                if let Value::Object(obj_ptr) = field {
+                                    frame = self.call_object(&mut frame, num_args, obj_ptr)?;
+                                } else {
+                                    return Err(InterpreterError::FunctionError(
+                                        line,
+                                        String::from(
+                                            "Attempt to call a value which is not a function",
+                                        ),
+                                    ));
+                                }
+                            } else {
+                                return Err(InterpreterError::NameError(
+                                    line,
+                                    String::from("Undefined property"),
+                                ));
+                            }
+                        }
+                    } else {
+                        return Err(InterpreterError::FunctionError(
+                            line,
+                            String::from("Attempted to call an object that's not callable"),
+                        ));
+                    }
                 }
             }
         }
