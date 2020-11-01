@@ -1,5 +1,7 @@
 use super::chunk::*;
-use super::value::{Class, Closure, FromValue, Function, Instance, Object, ToValue, Value};
+use super::value::{
+    BoundMethod, Class, Closure, FromValue, Function, Instance, Object, ToValue, Value,
+};
 use std::collections::HashMap;
 use std::mem::swap;
 
@@ -102,6 +104,16 @@ impl VirtualMemory {
     #[inline]
     fn closure_deref(&self, closure_p: u64) -> &Closure {
         self.heap[&closure_p].as_closure()
+    }
+
+    #[inline]
+    fn fun_deref(&self, fun_p: u64) -> &Function {
+        self.heap[&fun_p].as_fun()
+    }
+
+    #[inline]
+    fn class_deref(&self, class_p: u64) -> &Class {
+        self.heap[&class_p].as_class()
     }
 
     #[inline]
@@ -243,6 +255,17 @@ impl VM {
                         Self::add_to_worklist(gc_marks, worklist, *obj_ptr);
                     }
                 }
+            }
+            Object::Class(class) => {
+                for closure_ptr in class.methods.values() {
+                    Self::add_to_worklist(gc_marks, worklist, *closure_ptr);
+                }
+            }
+            Object::BoundMethod(bound_method) => {
+                if let Value::Object(ptr) = bound_method.receiver {
+                    Self::add_to_worklist(gc_marks, worklist, ptr);
+                }
+                Self::add_to_worklist(gc_marks, worklist, bound_method.closure_ptr);
             }
             _ => {}
         }
@@ -477,13 +500,7 @@ impl VM {
         num_args: usize,
     ) -> Result<(CallFrame, CallFrame), InterpreterError> {
         let line = self.current_line(&frame);
-        let obj = self.heap().deref(closure.function_pointer);
-
-        let fun_def = if let Object::Function(fun_def) = obj {
-            fun_def
-        } else {
-            panic!("Expected a function object");
-        };
+        let fun_def = self.heap().fun_deref(closure.function_pointer);
 
         if fun_def.arity != num_args {
             return Err(InterpreterError::FunctionError(
@@ -499,7 +516,7 @@ impl VM {
             ));
         }
 
-        let stack_pointer = self.stack.len() - num_args;
+        let stack_pointer = self.stack.len() - (num_args + 1); // +1 for "this"
         let new_frame = CallFrame {
             closure_pointer: closure_p,
             ip: 0,
@@ -655,23 +672,13 @@ impl VM {
                     self.binary_op(&frame, |a: f64, b: f64| a < b)?;
                 }
                 OpCode::DefineGlobal(string_idx) => {
-                    let name_ptr =
-                        if let Value::Object(ptr) = self.read_constant(&frame, string_idx) {
-                            ptr
-                        } else {
-                            panic!("Expected object.")
-                        };
+                    let name_ptr = u64::as_val_or_panic(self.read_constant(&frame, string_idx));
                     let name = self.heap().string_deref(name_ptr).clone();
                     let value = self.pop();
                     self.globals.insert(name, value);
                 }
                 OpCode::GetGlobal(string_idx) => {
-                    let name_ptr =
-                        if let Value::Object(ptr) = self.read_constant(&frame, string_idx) {
-                            ptr
-                        } else {
-                            panic!("Expected object.")
-                        };
+                    let name_ptr = u64::as_val_or_panic(self.read_constant(&frame, string_idx));
                     let name = self.heap().string_deref(name_ptr);
                     if !self.globals.contains_key(name) {
                         return Err(InterpreterError::NameError(
@@ -684,12 +691,7 @@ impl VM {
                     }
                 }
                 OpCode::SetGlobal(string_idx) => {
-                    let name_ptr =
-                        if let Value::Object(ptr) = self.read_constant(&frame, string_idx) {
-                            ptr
-                        } else {
-                            panic!("Expected object.")
-                        };
+                    let name_ptr = u64::as_val_or_panic(self.read_constant(&frame, string_idx));
                     let name = self.heap().string_deref(name_ptr).clone();
                     if !self.globals.contains_key(&name) {
                         return Err(InterpreterError::NameError(
@@ -722,7 +724,7 @@ impl VM {
                 }
                 OpCode::Call(num_args) => {
                     let line = self.current_line(&frame);
-                    let obj_ptr = if let Value::Object(obj_ptr) = self.peek(num_args) {
+                    let obj_ptr = if let Value::Object(obj_ptr) = self.peek(num_args + 1) {
                         *obj_ptr
                     } else {
                         return Err(InterpreterError::FunctionError(
@@ -750,13 +752,24 @@ impl VM {
                             self.call_frames.push(old_frame);
                             frame = new_frame;
                         }
-                        Object::Class(class) => {
+                        Object::Class(_) => {
                             let obj_instance = Object::Instance(Instance {
                                 class_ptr: obj_ptr,
                                 fields: HashMap::new(),
                             });
                             let addr = self.add_to_heap(obj_instance);
+                            self.pop(); //This
                             self.push(Value::Object(addr));
+                        }
+                        Object::BoundMethod(bound_method) => {
+                            let closure_ptr = bound_method.closure_ptr;
+                            let closure = self.heap().closure_deref(closure_ptr);
+                            let receiver = bound_method.receiver; //Copy here to drop the ref to bound_method
+                            let (old_frame, new_frame) =
+                                self.call_lox_function(&frame, closure, closure_ptr, num_args)?;
+                            self.call_frames.push(old_frame);
+                            frame = new_frame;
+                            self.write_stack(&frame, 0, receiver);
                         }
                         _ => {
                             println!("{}", obj);
@@ -807,42 +820,46 @@ impl VM {
                 }
                 OpCode::Class(const_idx) => {
                     let value = self.read_constant(&frame, const_idx);
-                    if let Value::Object(ptr) = value {
-                        let name = self.heap().string_deref(ptr).clone();
-                        let new_class = Object::Class(Class { name });
-                        let addr = self.add_to_heap(new_class);
-                        self.push(Value::Object(addr));
-                    } else {
-                        panic!("Expected object.");
-                    }
+                    let ptr = u64::as_val_or_panic(value);
+                    let name = self.heap().string_deref(ptr).clone();
+                    let new_class = Object::Class(Class {
+                        name,
+                        methods: HashMap::new(),
+                    });
+                    let addr = self.add_to_heap(new_class);
+                    self.push(Value::Object(addr));
                 }
                 OpCode::GetProperty(const_idx) => {
                     let line = self.current_line(&frame);
-                    let name_ptr =
-                        if let Value::Object(name_ptr) = self.read_constant(&frame, const_idx) {
-                            name_ptr
-                        } else {
-                            panic!("Expected object");
-                        };
+                    let name_ptr = u64::as_val_or_panic(self.read_constant(&frame, const_idx));
                     let name = self.heap().string_deref(name_ptr).clone(); //Can we eliminate this clone?
 
-                    let value = self.pop();
-                    let instance_ptr = if let Value::Object(ptr) = value {
-                        ptr
-                    } else {
-                        panic!("Expected object");
-                    };
+                    let instance_value = self.pop();
+                    let instance_ptr = u64::as_val_or_panic(instance_value);
                     let object = self.heap().deref(instance_ptr);
                     if let Object::Instance(instance) = object {
-                        let value = if let Some(value) = instance.fields.get(&name) {
-                            *value
+                        let field_val = instance.fields.get(&name).copied();
+                        if let Some(value) = field_val {
+                            //Read the field
+                            self.push(value);
                         } else {
-                            return Err(InterpreterError::NameError(
-                                line,
-                                format!("Undefined property {}", name),
-                            ));
+                            //check if there's a method
+                            let class = self.heap().class_deref(instance.class_ptr);
+                            let closure_ptr = class.methods.get(&name).copied();
+                            if let Some(closure_ptr) = closure_ptr {
+                                let bound_method = Object::BoundMethod(BoundMethod {
+                                    receiver: Value::Object(instance_ptr),
+                                    closure_ptr,
+                                });
+                                let addr = self.add_to_heap(bound_method);
+                                self.push(Value::Object(addr));
+                            } else {
+                                return Err(InterpreterError::NameError(
+                                    line,
+                                    format!("Undefined property {}", name),
+                                ));
+                            }
                         };
-                        self.push(value);
                     } else {
                         return Err(InterpreterError::TypeError(
                             line,
@@ -852,22 +869,13 @@ impl VM {
                 }
                 OpCode::SetProperty(const_idx) => {
                     let line = self.current_line(&frame);
-                    let name_ptr =
-                        if let Value::Object(name_ptr) = self.read_constant(&frame, const_idx) {
-                            name_ptr
-                        } else {
-                            panic!("Expected object");
-                        };
+                    let name_ptr = u64::as_val_or_panic(self.read_constant(&frame, const_idx));
                     let name = self.heap().string_deref(name_ptr).clone(); //Can we eliminate this clone?
 
                     let value_set = self.pop();
 
                     let instance_value = self.pop();
-                    let instance_ptr = if let Value::Object(ptr) = instance_value {
-                        ptr
-                    } else {
-                        panic!("Expected object");
-                    };
+                    let instance_ptr = u64::as_val_or_panic(instance_value);
                     let object = self.heap_mut().deref_mut(instance_ptr);
                     if let Object::Instance(instance) = object {
                         instance.fields.insert(name, value_set);
@@ -878,6 +886,23 @@ impl VM {
                             format!("Attempted to access field {}, but target was not an instance of an object", name),
                         ));
                     }
+                }
+                OpCode::Method(const_idx) => {
+                    let string_ptr = u64::as_val_or_panic(self.read_constant(&frame, const_idx));
+                    let method_name = self.heap().string_deref(string_ptr).clone();
+
+                    let method_ptr = u64::as_val_or_panic(self.pop());
+
+                    let class_ptr = u64::as_val_or_panic(*self.peek(0));
+                    let class_obj = self.heap_mut().deref_mut(class_ptr);
+                    if let Object::Class(class) = class_obj {
+                        class.methods.insert(method_name, method_ptr);
+                    } else {
+                        panic!("Expected class object");
+                    }
+                }
+                OpCode::ThisPlaceholder => {
+                    self.push(Value::Nil);
                 }
             }
         }

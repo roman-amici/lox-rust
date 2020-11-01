@@ -35,6 +35,8 @@ pub enum OpCode {
     SetProperty(usize), //Constant index for name
     GetProperty(usize),
     CloseUpvalue,
+    Method(usize), //Constant index for name
+    ThisPlaceholder,
     EOF,
 }
 

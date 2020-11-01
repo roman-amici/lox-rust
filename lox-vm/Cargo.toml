@@ -9,4 +9,3 @@ edition = "2018"
 [dependencies]
 
 num_enum = "0.5.1"
-rand = "0.7.3"

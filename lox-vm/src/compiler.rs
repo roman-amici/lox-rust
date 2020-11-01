@@ -215,6 +215,11 @@ impl Compiler {
                     infix: Some(Compiler::dot),
                     precedence: Precedence::Call,
                 }),
+                TokenType::This => rules.push(ParseRule {
+                    prefix: Some(Compiler::this),
+                    infix: None,
+                    precedence: Precedence::None,
+                }),
                 _ => rules.push(ParseRule {
                     prefix: None,
                     infix: None,
@@ -372,13 +377,12 @@ impl Compiler {
         }
     }
 
-    fn variable(&mut self, can_assign: bool) -> Result<(), CompilerError> {
-        let (line, name) = {
-            let token = self.previous();
-            let name = token.literal.as_ref().unwrap().clone();
-            (token.line, name)
-        };
-
+    fn name_variable(
+        &mut self,
+        can_assign: bool,
+        name: String,
+        line: usize,
+    ) -> Result<(), CompilerError> {
         let (set_op, get_op) = if let Some(id) =
             Self::resolve_local(&self.code_scope(), &name, line)?
         {
@@ -398,6 +402,14 @@ impl Compiler {
             self.chunk().append_chunk(get_op, line);
         }
         Ok(())
+    }
+
+    fn variable(&mut self, can_assign: bool) -> Result<(), CompilerError> {
+        let token = self.previous();
+        let line = token.line;
+        let name = token.lexeme.clone();
+
+        self.name_variable(can_assign, name, line)
     }
 
     fn number(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
@@ -696,11 +708,11 @@ impl Compiler {
         Ok(())
     }
 
-    fn parse_function(&mut self) -> Result<(), CompilerError> {
+    fn parse_function(&mut self, fn_type: FnType) -> Result<(), CompilerError> {
         //Swap in a new scope for the new function
         let function_name = self.previous().lexeme.clone();
         self.code_scopes.push(CodeScope {
-            function: Function::new(function_name, 0, FnType::Function),
+            function: Function::new(function_name, 0, fn_type),
             locals: vec![],
             upvalues: vec![],
             depth: 0,
@@ -709,10 +721,26 @@ impl Compiler {
         self.begin_scope();
         self.try_consume(TokenType::LeftParen, "Expected '(' after function name.")?;
 
+        let this_name = if let FnType::Method = fn_type {
+            "this"
+        } else {
+            ""
+        };
+        self.code_scope().locals.push(Local {
+            name: Token {
+                token_type: TokenType::This,
+                lexeme: String::from(this_name), //Use lexeme some places and literal others... should standardize
+                line: 0,
+                literal: Some(String::from(this_name)),
+            },
+            depth: 0,
+            initialized: true,
+            captured: false,
+        });
+
         if !self.check_token(TokenType::RightParen) {
             loop {
                 self.code_scope().function.arity += 1;
-                //We can handle as much arity as possible!
 
                 let str_ptr = self.parse_variable("Expected parameter name")?;
                 let line = self.previous().line;
@@ -733,7 +761,7 @@ impl Compiler {
         self.try_consume(TokenType::LeftBrace, "Expected '{' before function body.")?;
         self.block()?;
 
-        //Implicitly return nil
+        //return nil if we fall off the end of the function
         let line = self.peek().line;
         self.chunk().append_chunk(OpCode::Nil, line);
         self.chunk().append_chunk(OpCode::Return, line);
@@ -761,24 +789,52 @@ impl Compiler {
         let str_ptr = self.parse_variable("Expected function name")?;
         let line = self.peek().line;
 
-        self.parse_function()?;
+        self.parse_function(FnType::Function)?;
 
         self.finish_define(str_ptr, line);
 
         Ok(())
     }
 
+    fn method(&mut self) -> Result<(), CompilerError> {
+        let token = self.try_consume(TokenType::Identifier, "Expected method name.")?;
+
+        let method_name = token.lexeme.clone();
+        let addr = self.heap.add_to_heap(Object::String(method_name));
+        let constant_idx = self.chunk().add_constant(Value::Object(addr));
+
+        self.parse_function(FnType::Method)?;
+
+        self.chunk()
+            .append_chunk(OpCode::Method(constant_idx), token.line);
+
+        Ok(())
+    }
+
+    fn this(&mut self, _can_assign: bool) -> Result<(), CompilerError> {
+        self.variable(false)
+    }
+
     fn class_declaration(&mut self) -> Result<(), CompilerError> {
         let name_addr = self.parse_variable("Expected class name")?;
+        let name = self.previous().lexeme.clone();
         let offset = self.chunk().add_constant(Value::Object(name_addr));
         let line = self.previous().line;
 
         self.chunk().append_chunk(OpCode::Class(offset), line);
         self.finish_define(name_addr, line);
 
+        //Push the variable reference to the class onto the stack.
+        self.name_variable(false, name, line)?;
+
         self.try_consume(TokenType::LeftBrace, "Expected '{' before class body")?;
-        //Parse methods
+        while !self.check_token(TokenType::RightBrace) && !self.check_token(TokenType::EOF) {
+            self.method()?;
+        }
         self.try_consume(TokenType::RightBrace, "Expected '}' after class body")?;
+
+        //Pop the named reference to the variable off the stack
+        self.chunk().append_chunk(OpCode::Pop, line);
 
         Ok(())
     }
@@ -914,6 +970,7 @@ impl Compiler {
     }
 
     fn argument_list(&mut self) -> Result<usize, CompilerError> {
+        self.chunk().append_chunk(OpCode::ThisPlaceholder, 0);
         let mut arg_count = 0;
         if !self.check_token(TokenType::RightParen) {
             loop {

@@ -34,6 +34,7 @@ pub enum Object {
     OpenUpvalue(usize, usize), //call_frame, slot
     Class(Class),
     Instance(Instance),
+    BoundMethod(BoundMethod),
 }
 
 impl Object {
@@ -68,6 +69,22 @@ impl Object {
             panic!("Deref object is not a string");
         }
     }
+
+    pub fn as_class(&self) -> &Class {
+        if let Object::Class(class) = self {
+            class
+        } else {
+            panic!("Deref object is not a class");
+        }
+    }
+
+    pub fn as_fun(&self) -> &Function {
+        if let Object::Function(fun) = self {
+            fun
+        } else {
+            panic!("Derfe object is not a function")
+        }
+    }
 }
 
 impl Display for Object {
@@ -81,8 +98,16 @@ impl Display for Object {
             Object::OpenUpvalue(call_frame, slot) => {
                 write!(f, "< cf: {}, slot : {}>", call_frame, slot)
             }
-            Object::Class(class) => write!(f, "<class {}>", class.name),
+            Object::Class(class) => write!(
+                f,
+                "<class {} |{} methods|>",
+                class.name,
+                class.methods.len()
+            ),
             Object::Instance(_) => write!(f, "<Object>"),
+            Object::BoundMethod(bound_method) => {
+                write!(f, "<BoundMethod {}>", bound_method.receiver)
+            }
         }
     }
 }
@@ -91,6 +116,7 @@ impl Display for Object {
 pub enum FnType {
     Function,
     Script,
+    Method,
 }
 
 #[derive(Clone)]
@@ -127,6 +153,7 @@ impl Function {
 #[derive(Clone)]
 pub struct Class {
     pub name: String,
+    pub methods: HashMap<String, u64>,
 }
 
 #[derive(Clone)]
@@ -135,11 +162,18 @@ pub struct Instance {
     pub fields: HashMap<String, Value>,
 }
 
+#[derive(Clone)]
+pub struct BoundMethod {
+    pub receiver: Value,
+    pub closure_ptr: u64,
+}
+
 pub trait FromValue
 where
     Self: Sized,
 {
     fn as_val(val: Value, line: usize) -> Result<Self, InterpreterError>;
+    fn as_val_or_panic(val: Value) -> Self;
 }
 
 pub trait FromValueRef {
@@ -156,6 +190,30 @@ impl FromValue for f64 {
             )),
         }
     }
+    fn as_val_or_panic(val: Value) -> f64 {
+        match val {
+            Value::Number(n) => n,
+            _ => panic!("Expected a number"),
+        }
+    }
+}
+
+impl FromValue for u64 {
+    fn as_val(val: Value, line: usize) -> Result<u64, InterpreterError> {
+        match val {
+            Value::Object(ptr) => Ok(ptr),
+            _ => Err(InterpreterError::TypeError(
+                line,
+                String::from("Expected an object"),
+            )),
+        }
+    }
+    fn as_val_or_panic(val: Value) -> u64 {
+        match val {
+            Value::Object(ptr) => ptr,
+            _ => panic!("Expected an object"),
+        }
+    }
 }
 
 impl FromValue for bool {
@@ -166,6 +224,12 @@ impl FromValue for bool {
                 line,
                 String::from("Expected a boolean"),
             )),
+        }
+    }
+    fn as_val_or_panic(val: Value) -> bool {
+        match val {
+            Value::Boolean(b) => b,
+            _ => panic!("Expected a boolean"),
         }
     }
 }
