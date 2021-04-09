@@ -1,10 +1,44 @@
 use super::token::Token;
 use super::token::TokenType;
+use lazy_static::lazy_static;
+use std::collections::HashMap;
+use std::fmt;
 
 #[derive(Debug)]
 pub struct ScannerError {
     pub line: usize,
     pub description: String,
+}
+
+impl fmt::Display for ScannerError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(f, "{}: {}", self.line, self.description)
+    }
+}
+
+lazy_static! {
+    static ref LITERAL_TO_TOKEN: HashMap<&'static str, TokenType> = vec![
+        ("and", TokenType::And),
+        ("class", TokenType::Class),
+        ("else", TokenType::Else),
+        ("false", TokenType::False),
+        ("true", TokenType::True),
+        ("fun", TokenType::Fun),
+        ("for", TokenType::For),
+        ("if", TokenType::If),
+        ("nil", TokenType::Nil),
+        ("or", TokenType::Or),
+        ("print", TokenType::Print),
+        ("return", TokenType::Return),
+        ("super", TokenType::Super),
+        ("this", TokenType::This),
+        ("var", TokenType::Var),
+        ("while", TokenType::While),
+        ("EOF", TokenType::EOF),
+    ]
+    .iter()
+    .copied()
+    .collect();
 }
 
 struct LexicalScanner {
@@ -185,25 +219,10 @@ impl LexicalScanner {
 
     pub fn literal_to_token_type(literal: &String) -> TokenType {
         //Todo, figure out a way to use a hashtable.
-        match &literal[..] {
-            "and" => TokenType::And,
-            "class" => TokenType::Class,
-            "else" => TokenType::Else,
-            "false" => TokenType::False,
-            "true" => TokenType::True,
-            "fun" => TokenType::Fun,
-            "for" => TokenType::For,
-            "if" => TokenType::If,
-            "nil" => TokenType::Nil,
-            "or" => TokenType::Or,
-            "print" => TokenType::Print,
-            "return" => TokenType::Return,
-            "super" => TokenType::Super,
-            "this" => TokenType::This,
-            "var" => TokenType::Var,
-            "while" => TokenType::While,
-            "EOF" => TokenType::EOF,
-            _ => TokenType::Identifier,
+        if let Some(token) = LITERAL_TO_TOKEN.get(&literal[..]) {
+            *token
+        } else {
+            TokenType::Identifier
         }
     }
 }
@@ -287,13 +306,14 @@ pub fn scan_tokens(source: &String) -> Result<Vec<Token>, ScannerError> {
             'a'..='z' | 'A'..='Z' => scanner.consume_identifier_or_keyword(),
             _ => Err(ScannerError {
                 line: scanner.line,
-                description: String::from("Unrecognized Token"),
+                description: String::from(format!("Unrecognized Token {}", c)),
             }),
         };
 
         token_or_error?;
     }
 
+    // Add an EOF to the end of the sequence
     scanner.tokens.push(Token {
         token_type: TokenType::EOF,
         lexeme: String::from("EOF"),
@@ -312,7 +332,6 @@ mod scanner_tests {
         let test_input = String::from("() \r { \n  +-;");
         let tokens = scan_tokens(&test_input).unwrap();
 
-        assert_eq!(tokens.len(), 6);
         assert_eq!(tokens[0].token_type, TokenType::LeftParen);
         assert_eq!(tokens[1].token_type, TokenType::RightParen);
         assert_eq!(tokens[2].token_type, TokenType::LeftBrace);
@@ -326,7 +345,6 @@ mod scanner_tests {
         let test_input = String::from("== = <=\n< >= > !==");
         let tokens = scan_tokens(&test_input).unwrap();
 
-        assert_eq!(tokens.len(), 8);
         assert_eq!(tokens[0].token_type, TokenType::EqualEqual);
         assert_eq!(tokens[1].token_type, TokenType::Equal);
         assert_eq!(tokens[2].token_type, TokenType::LessEqual);
@@ -390,7 +408,6 @@ mod scanner_tests {
         let test_input = String::from(" valid one123 123one");
         let tokens = scan_tokens(&test_input).unwrap();
 
-        assert_eq!(tokens.len(), 4);
         assert_eq!(tokens[0].token_type, TokenType::Identifier);
         assert_eq!(tokens[1].token_type, TokenType::Identifier);
         assert_eq!(tokens[2].token_type, TokenType::NumberToken);
@@ -407,7 +424,6 @@ mod scanner_tests {
         let test_input = String::from(" valid class! classical true this;");
         let tokens = scan_tokens(&test_input).unwrap();
 
-        assert_eq!(tokens.len(), 7);
         assert_eq!(tokens[0].token_type, TokenType::Identifier);
         assert_eq!(tokens[1].token_type, TokenType::Class);
         assert_eq!(tokens[3].token_type, TokenType::Identifier);

@@ -38,6 +38,7 @@ pub enum OpCode {
     Method(usize),        //Constant index for name
     Invoke(usize, usize), //Constant index for name, argCount
     ThisPlaceholder,
+    Inherit,
     EOF,
 }
 

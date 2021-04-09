@@ -9,3 +9,5 @@ edition = "2018"
 [dependencies]
 
 num_enum = "0.5.1"
+rustyline = "8.0.0"
+lazy_static = "1.4.0"

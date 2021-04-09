@@ -858,6 +858,22 @@ impl Compiler {
         self.chunk().append_chunk(OpCode::Class(offset), line);
         self.finish_define(name_addr, line);
 
+        if self.match_token(TokenType::Less) {
+            let token = self.try_consume(TokenType::Identifier, "Expected superclass name")?;
+            let superclass_name = token.lexeme.clone();
+            let line = token.line;
+
+            if superclass_name == name {
+                return Err(CompilerError::SyntaxError(
+                    String::from("A class can't inherit from itself"),
+                    line,
+                ));
+            }
+
+            self.name_variable(false, superclass_name, line)?;
+            self.chunk().append_chunk(OpCode::Inherit, line);
+        }
+
         //Push the variable reference to the class onto the stack.
         self.name_variable(false, name, line)?;
 

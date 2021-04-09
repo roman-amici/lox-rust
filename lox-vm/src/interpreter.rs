@@ -3,6 +3,7 @@ use super::value::{
     BoundMethod, Class, Closure, FromValue, Function, Instance, Object, ToValue, Value,
 };
 use std::collections::HashMap;
+use std::fmt;
 use std::mem::swap;
 
 pub enum InterpreterError {
@@ -11,12 +12,12 @@ pub enum InterpreterError {
     FunctionError(usize, String),
 }
 
-impl InterpreterError {
-    pub fn to_string(&self) -> String {
+impl fmt::Display for InterpreterError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match self {
             InterpreterError::TypeError(line, msg)
             | InterpreterError::NameError(line, msg)
-            | InterpreterError::FunctionError(line, msg) => format!("{}: {}", line, msg),
+            | InterpreterError::FunctionError(line, msg) => write!(f, "{}: {}", line, msg),
         }
     }
 }
@@ -974,6 +975,30 @@ impl VM {
                             line,
                             String::from("Attempted to call an object that's not callable"),
                         ));
+                    }
+                }
+                OpCode::Inherit => {
+                    //Need to make copies since we need a mutable reference to subclass
+                    let superclass_addr = u64::as_val_or_panic(*self.peek(1));
+                    let line = self.current_line(&frame);
+                    let mut superclass_methods =
+                        if let Object::Class(superclass) = self.heap().deref(superclass_addr) {
+                            let mut superclass_methods: Vec<(String, u64)> = vec![];
+                            for (key, value) in superclass.methods.iter() {
+                                superclass_methods.push((key.clone(), *value));
+                            }
+                            superclass_methods
+                        } else {
+                            return Err(InterpreterError::TypeError(
+                                line,
+                                String::from("Superclass must be a class object"),
+                            ));
+                        };
+
+                    let subclass_addr = u64::as_val_or_panic(*self.peek(0));
+                    let subclass = self.heap_mut().deref_mut(subclass_addr).as_class_mut();
+                    for (key, value) in superclass_methods.drain(..) {
+                        subclass.methods.insert(key, value);
                     }
                 }
             }

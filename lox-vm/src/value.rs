@@ -78,6 +78,14 @@ impl Object {
         }
     }
 
+    pub fn as_class_mut(&mut self) -> &mut Class {
+        if let Object::Class(class) = self {
+            class
+        } else {
+            panic!("Deref object is not a class");
+        }
+    }
+
     pub fn as_fun(&self) -> &Function {
         if let Object::Function(fun) = self {
             fun
