@@ -1,6 +1,6 @@
 use super::chunk::*;
 use super::value::{
-    BoundMethod, Class, Closure, FromValue, Function, Instance, Object, ToValue, Value,
+    BoundMethod, Class, Closure, FromValue, Function, Instance, LoxPtr, Object, ToValue, Value,
 };
 use std::collections::HashMap;
 use std::fmt;
@@ -29,14 +29,14 @@ pub enum GCMark {
 
 #[derive(Clone, Copy)]
 pub struct CallFrame {
-    closure_pointer: u64,
+    closure_pointer: LoxPtr,
     ip: usize,
     stack_pointer: usize,
 }
 
 pub struct VirtualMemory {
-    pub heap: HashMap<u64, Object>,
-    pub next_addr: u64,
+    pub heap: Vec<Object>,
+    pub current_addr: usize,
     pub allocations: u64,
     pub max_allocations: u64,
 }
@@ -45,96 +45,81 @@ impl VirtualMemory {
     pub fn new() -> VirtualMemory {
         let max_allocations = if cfg!(test_gc) { 5 } else { 500 };
         VirtualMemory {
-            heap: HashMap::new(),
-            next_addr: 0,
+            heap: Vec::new(),
+            current_addr: 0,
             allocations: 0,
             max_allocations,
         }
     }
 
-    #[inline]
-    pub fn next_addr_inner(&mut self) -> Option<u64> {
-        while self.next_addr < u64::MAX {
-            if !self.heap.contains_key(&self.next_addr) {
-                let addr = self.next_addr;
-                self.next_addr += 1;
-                return Some(addr);
-            }
-            self.next_addr += 1;
-        }
-
-        None
-    }
-
-    pub fn next_addr(&mut self) -> u64 {
-        if let Some(addr) = self.next_addr_inner() {
-            addr
+    pub fn next_addr(&mut self) -> LoxPtr {
+        if self.current_addr < usize::MAX {
+            let old = self.current_addr;
+            self.current_addr += 1;
+            old
         } else {
-            self.next_addr = 0;
-            if let Some(addr) = self.next_addr_inner() {
-                addr
-            } else {
-                panic!("Out of memory!");
-            }
+            // Todo: try compactifying first
+            panic!("Out of memory!");
         }
     }
 
     #[inline]
-    pub fn add_to_heap(&mut self, object: Object) -> u64 {
+    pub fn add_to_heap(&mut self, object: Object) -> LoxPtr {
         self.allocations += 1;
         let new_address = self.next_addr();
-        self.heap.insert(new_address, object);
+        self.heap.push(object);
+        assert_eq!(self.heap.len() - 1, new_address);
         new_address
     }
 
     #[inline]
-    pub fn remove_from_heap(&mut self, addr: u64) {
-        self.heap.remove(&addr);
+    pub fn remove_from_heap(&mut self, addr: LoxPtr) {
+        self.heap[addr] = Object::Empty;
     }
 
     #[inline]
-    pub fn deref(&self, ptr: u64) -> &Object {
-        &self.heap[&ptr]
+    pub fn deref(&self, ptr: LoxPtr) -> &Object {
+        &self.heap[ptr]
     }
 
     #[inline]
-    pub fn deref_mut(&mut self, ptr: u64) -> &mut Object {
-        self.heap.get_mut(&ptr).unwrap()
+    pub fn deref_mut(&mut self, ptr: LoxPtr) -> &mut Object {
+        self.heap.get_mut(ptr).unwrap()
     }
 
     #[inline]
-    fn closure_deref(&self, closure_p: u64) -> &Closure {
-        self.heap[&closure_p].as_closure()
+    fn closure_deref(&self, closure_p: LoxPtr) -> &Closure {
+        self.heap[closure_p].as_closure()
     }
 
     #[inline]
-    fn fun_deref(&self, fun_p: u64) -> &Function {
-        self.heap[&fun_p].as_fun()
+    fn fun_deref(&self, fun_p: LoxPtr) -> &Function {
+        self.heap[fun_p].as_fun()
     }
 
     #[inline]
-    fn class_deref(&self, class_p: u64) -> &Class {
-        self.heap[&class_p].as_class()
+    fn class_deref(&self, class_p: LoxPtr) -> &Class {
+        self.heap[class_p].as_class()
     }
 
     #[inline]
-    fn value_deref(&self, value_ptr: u64) -> Value {
-        self.heap[&value_ptr].as_value()
+    fn value_deref(&self, value_ptr: LoxPtr) -> Value {
+        self.heap[value_ptr].as_value()
     }
 
     #[inline]
-    fn write(&mut self, addr: u64, object: Object) {
-        self.heap.insert(addr, object);
+    fn write(&mut self, addr: LoxPtr, object: Object) {
+        self.heap[addr] = object;
     }
 
     #[inline]
-    fn function_deref(&self, fp: u64) -> &Function {
-        self.heap[&fp].as_function()
+    fn function_deref(&self, fp: LoxPtr) -> &Function {
+        self.heap[fp].as_function()
     }
 
     #[inline]
-    fn string_deref(&self, str_ptr: u64) -> &String {
-        self.heap[&str_ptr].as_string()
+    fn string_deref(&self, str_ptr: LoxPtr) -> &String {
+        self.heap[str_ptr].as_string()
     }
 }
 
@@ -144,7 +129,7 @@ pub struct VM {
     globals: HashMap<String, Value>,
     //Never holds the active frame
     call_frames: Vec<CallFrame>,
-    open_upvalues: Vec<(usize, usize, u64)>, //Nope, linear search.
+    open_upvalues: Vec<(usize, usize, LoxPtr)>, //Nope, linear search.
 }
 
 impl VM {
@@ -188,7 +173,7 @@ impl VM {
         self.run()
     }
 
-    fn mark_object_started(gc_marks: &mut HashMap<u64, GCMark>, ptr: u64) -> bool {
+    fn mark_object_started(gc_marks: &mut HashMap<LoxPtr, GCMark>, ptr: LoxPtr) -> bool {
         if !gc_marks.contains_key(&ptr) {
             gc_marks.insert(ptr, GCMark::Started);
             true
@@ -197,7 +182,7 @@ impl VM {
         }
     }
 
-    fn mark_stack(&mut self, gc_marks: &mut HashMap<u64, GCMark>) {
+    fn mark_stack(&mut self, gc_marks: &mut HashMap<LoxPtr, GCMark>) {
         for value in self.stack.iter() {
             if let Value::Object(ptr) = value {
                 Self::mark_object_started(gc_marks, *ptr);
@@ -205,7 +190,7 @@ impl VM {
         }
     }
 
-    fn mark_globals(&self, gc_marks: &mut HashMap<u64, GCMark>) {
+    fn mark_globals(&self, gc_marks: &mut HashMap<LoxPtr, GCMark>) {
         for val in self.globals.values() {
             if let Value::Object(ptr) = val {
                 Self::mark_object_started(gc_marks, *ptr);
@@ -213,7 +198,11 @@ impl VM {
         }
     }
 
-    fn mark_callframes(&mut self, current_frame: &CallFrame, gc_marks: &mut HashMap<u64, GCMark>) {
+    fn mark_callframes(
+        &mut self,
+        current_frame: &CallFrame,
+        gc_marks: &mut HashMap<LoxPtr, GCMark>,
+    ) {
         Self::mark_object_started(gc_marks, current_frame.closure_pointer);
 
         for frame in self.call_frames.iter() {
@@ -222,13 +211,22 @@ impl VM {
     }
 
     #[inline]
-    fn add_to_worklist(gc_marks: &mut HashMap<u64, GCMark>, worklist: &mut Vec<u64>, ptr: u64) {
+    fn add_to_worklist(
+        gc_marks: &mut HashMap<LoxPtr, GCMark>,
+        worklist: &mut Vec<LoxPtr>,
+        ptr: LoxPtr,
+    ) {
         if Self::mark_object_started(gc_marks, ptr) {
             worklist.push(ptr);
         }
     }
 
-    fn mark_object(&self, gc_marks: &mut HashMap<u64, GCMark>, worklist: &mut Vec<u64>, ptr: u64) {
+    fn mark_object(
+        &self,
+        gc_marks: &mut HashMap<LoxPtr, GCMark>,
+        worklist: &mut Vec<LoxPtr>,
+        ptr: LoxPtr,
+    ) {
         let object = self.heap().deref(ptr);
         match object {
             Object::Closure(closure) => {
@@ -272,11 +270,16 @@ impl VM {
         }
     }
 
-    fn sweep(&mut self, gc_marks: &HashMap<u64, GCMark>) {
-        let mut to_remove: Vec<u64> = vec![];
-        for ptr in self.heap().heap.keys() {
-            if !gc_marks.contains_key(ptr) {
-                to_remove.push(*ptr);
+    fn sweep(&mut self, gc_marks: &HashMap<LoxPtr, GCMark>) {
+        let mut to_remove: Vec<usize> = vec![];
+        for (ptr, obj) in self.heap().heap.iter().enumerate() {
+            match obj {
+                Object::Empty => (),
+                _ => {
+                    if !gc_marks.contains_key(&ptr) {
+                        to_remove.push(ptr);
+                    }
+                }
             }
         }
         for ptr in to_remove.iter() {
@@ -289,13 +292,13 @@ impl VM {
     }
 
     fn collect_garbage(&mut self, current_frame: &CallFrame) {
-        let mut gc_marks: HashMap<u64, GCMark> = HashMap::new();
+        let mut gc_marks: HashMap<LoxPtr, GCMark> = HashMap::new();
 
         self.mark_stack(&mut gc_marks);
         self.mark_globals(&mut gc_marks);
         self.mark_callframes(current_frame, &mut gc_marks);
 
-        let mut worklist: Vec<u64> = gc_marks.iter().map(|(k, _)| *k).collect();
+        let mut worklist: Vec<LoxPtr> = gc_marks.iter().map(|(k, _)| *k).collect();
 
         while worklist.len() > 0 {
             let ptr = worklist.pop().unwrap();
@@ -364,13 +367,13 @@ impl VM {
     }
 
     #[inline]
-    fn chunk(&self, closure_p: u64) -> &Chunk {
+    fn chunk(&self, closure_p: LoxPtr) -> &Chunk {
         let fp = self.heap().closure_deref(closure_p).function_pointer;
         &self.heap().function_deref(fp).chunk
     }
 
     #[inline]
-    fn code(&self, closure_p: u64) -> &Vec<OpCode> {
+    fn code(&self, closure_p: LoxPtr) -> &Vec<OpCode> {
         &self.chunk(closure_p).code
     }
 
@@ -481,7 +484,7 @@ impl VM {
     }
 
     #[inline]
-    fn add_to_heap(&mut self, object: Object) -> u64 {
+    fn add_to_heap(&mut self, object: Object) -> LoxPtr {
         self.heap_mut().add_to_heap(object)
     }
 
@@ -497,7 +500,7 @@ impl VM {
         &'a self,
         frame: &CallFrame,
         closure: &Closure,
-        closure_p: u64,
+        closure_p: LoxPtr,
         num_args: usize,
     ) -> Result<(CallFrame, CallFrame), InterpreterError> {
         let line = self.current_line(&frame);
@@ -526,7 +529,7 @@ impl VM {
         Ok((*frame, new_frame))
     }
 
-    fn search_captured_upvalue(&self, call_frame_idx: usize, slot: usize) -> Option<u64> {
+    fn search_captured_upvalue(&self, call_frame_idx: usize, slot: usize) -> Option<LoxPtr> {
         if let Some((_cf, _s, ptr)) = self
             .open_upvalues
             .iter()
@@ -538,7 +541,7 @@ impl VM {
         }
     }
 
-    fn remove_open_upvalue(&mut self, call_frame_idx: usize, slot: usize) -> u64 {
+    fn remove_open_upvalue(&mut self, call_frame_idx: usize, slot: usize) -> LoxPtr {
         if let Some(idx) = self
             .open_upvalues
             .iter()
@@ -551,7 +554,7 @@ impl VM {
         }
     }
 
-    fn capture_upvalue(&mut self, frame: &CallFrame, upvalue: Upvalue) -> u64 {
+    fn capture_upvalue(&mut self, frame: &CallFrame, upvalue: Upvalue) -> LoxPtr {
         if upvalue.is_local {
             let call_frame_idx = self.call_frames.len(); //Use n+1 since the current frame is not added yet.
             if let Some(ptr) = self.search_captured_upvalue(call_frame_idx, upvalue.index) {
@@ -573,7 +576,7 @@ impl VM {
         &mut self,
         frame: &mut CallFrame,
         num_args: usize,
-        obj_ptr: u64,
+        obj_ptr: LoxPtr,
     ) -> Result<CallFrame, InterpreterError> {
         let line = self.current_line(frame);
         let obj = self.heap().deref(obj_ptr);
@@ -656,8 +659,8 @@ impl VM {
                         return Ok(());
                     }
 
-                    let mut to_open_upvalues: Vec<(usize, usize, u64)> = vec![];
-                    let mut to_remove: Vec<(usize, usize, u64)> = vec![];
+                    let mut to_open_upvalues: Vec<(usize, usize, LoxPtr)> = vec![];
+                    let mut to_remove: Vec<(usize, usize, LoxPtr)> = vec![];
 
                     let call_frame_idx = self.call_frames.len();
                     for (cf, s, ptr) in self.open_upvalues.iter() {
@@ -745,13 +748,13 @@ impl VM {
                     self.binary_op(&frame, |a: f64, b: f64| a < b)?;
                 }
                 OpCode::DefineGlobal(string_idx) => {
-                    let name_ptr = u64::as_val_or_panic(self.read_constant(&frame, string_idx));
+                    let name_ptr = LoxPtr::as_val_or_panic(self.read_constant(&frame, string_idx));
                     let name = self.heap().string_deref(name_ptr).clone();
                     let value = self.pop();
                     self.globals.insert(name, value);
                 }
                 OpCode::GetGlobal(string_idx) => {
-                    let name_ptr = u64::as_val_or_panic(self.read_constant(&frame, string_idx));
+                    let name_ptr = LoxPtr::as_val_or_panic(self.read_constant(&frame, string_idx));
                     let name = self.heap().string_deref(name_ptr);
                     if !self.globals.contains_key(name) {
                         return Err(InterpreterError::NameError(
@@ -764,7 +767,7 @@ impl VM {
                     }
                 }
                 OpCode::SetGlobal(string_idx) => {
-                    let name_ptr = u64::as_val_or_panic(self.read_constant(&frame, string_idx));
+                    let name_ptr = LoxPtr::as_val_or_panic(self.read_constant(&frame, string_idx));
                     let name = self.heap().string_deref(name_ptr).clone();
                     if !self.globals.contains_key(&name) {
                         return Err(InterpreterError::NameError(
@@ -810,7 +813,7 @@ impl VM {
                 }
                 OpCode::Closure(idx, num_upvalues) => {
                     if let Value::Object(function_pointer) = self.read_constant(&frame, idx) {
-                        let mut closed_values: Vec<u64> = vec![];
+                        let mut closed_values: Vec<LoxPtr> = vec![];
                         for _i in 0..num_upvalues {
                             if let OpCode::Upvalue(upvalue) = self.consume(&mut frame) {
                                 closed_values.push(self.capture_upvalue(&frame, upvalue));
@@ -848,7 +851,7 @@ impl VM {
                 }
                 OpCode::Class(const_idx) => {
                     let value = self.read_constant(&frame, const_idx);
-                    let ptr = u64::as_val_or_panic(value);
+                    let ptr = LoxPtr::as_val_or_panic(value);
                     let name = self.heap().string_deref(ptr).clone();
                     let new_class = Object::Class(Class {
                         name,
@@ -859,11 +862,11 @@ impl VM {
                 }
                 OpCode::GetProperty(const_idx) => {
                     let line = self.current_line(&frame);
-                    let name_ptr = u64::as_val_or_panic(self.read_constant(&frame, const_idx));
+                    let name_ptr = LoxPtr::as_val_or_panic(self.read_constant(&frame, const_idx));
                     let name = self.heap().string_deref(name_ptr).clone(); //Can we eliminate this clone?
 
                     let instance_value = self.pop();
-                    let instance_ptr = u64::as_val_or_panic(instance_value);
+                    let instance_ptr = LoxPtr::as_val_or_panic(instance_value);
                     let object = self.heap().deref(instance_ptr);
                     if let Object::Instance(instance) = object {
                         let field_val = instance.fields.get(&name).copied();
@@ -897,13 +900,13 @@ impl VM {
                 }
                 OpCode::SetProperty(const_idx) => {
                     let line = self.current_line(&frame);
-                    let name_ptr = u64::as_val_or_panic(self.read_constant(&frame, const_idx));
+                    let name_ptr = LoxPtr::as_val_or_panic(self.read_constant(&frame, const_idx));
                     let name = self.heap().string_deref(name_ptr).clone(); //Can we eliminate this clone?
 
                     let value_set = self.pop();
 
                     let instance_value = self.pop();
-                    let instance_ptr = u64::as_val_or_panic(instance_value);
+                    let instance_ptr = LoxPtr::as_val_or_panic(instance_value);
                     let object = self.heap_mut().deref_mut(instance_ptr);
                     if let Object::Instance(instance) = object {
                         instance.fields.insert(name, value_set);
@@ -916,12 +919,12 @@ impl VM {
                     }
                 }
                 OpCode::Method(const_idx) => {
-                    let string_ptr = u64::as_val_or_panic(self.read_constant(&frame, const_idx));
+                    let string_ptr = LoxPtr::as_val_or_panic(self.read_constant(&frame, const_idx));
                     let method_name = self.heap().string_deref(string_ptr).clone();
 
-                    let method_ptr = u64::as_val_or_panic(self.pop());
+                    let method_ptr = LoxPtr::as_val_or_panic(self.pop());
 
-                    let class_ptr = u64::as_val_or_panic(*self.peek(0));
+                    let class_ptr = LoxPtr::as_val_or_panic(*self.peek(0));
                     let class_obj = self.heap_mut().deref_mut(class_ptr);
                     if let Object::Class(class) = class_obj {
                         class.methods.insert(method_name, method_ptr);
@@ -934,10 +937,10 @@ impl VM {
                 }
                 OpCode::Invoke(const_idx, num_args) => {
                     let line = self.current_line(&frame);
-                    let string_ptr = u64::as_val_or_panic(self.read_constant(&frame, const_idx));
+                    let string_ptr = LoxPtr::as_val_or_panic(self.read_constant(&frame, const_idx));
                     let method_name = self.heap().string_deref(string_ptr).clone();
 
-                    let receiver_ptr = u64::as_val_or_panic(*self.peek(num_args + 1));
+                    let receiver_ptr = LoxPtr::as_val_or_panic(*self.peek(num_args + 1));
                     let receiver = self.heap().deref(receiver_ptr);
 
                     if let Object::Instance(instance) = receiver {
@@ -979,11 +982,11 @@ impl VM {
                 }
                 OpCode::Inherit => {
                     //Need to make copies since we need a mutable reference to subclass
-                    let superclass_addr = u64::as_val_or_panic(*self.peek(1));
+                    let superclass_addr = LoxPtr::as_val_or_panic(*self.peek(1));
                     let line = self.current_line(&frame);
                     let mut superclass_methods =
                         if let Object::Class(superclass) = self.heap().deref(superclass_addr) {
-                            let mut superclass_methods: Vec<(String, u64)> = vec![];
+                            let mut superclass_methods: Vec<(String, LoxPtr)> = vec![];
                             for (key, value) in superclass.methods.iter() {
                                 superclass_methods.push((key.clone(), *value));
                             }
@@ -995,7 +998,7 @@ impl VM {
                             ));
                         };
 
-                    let subclass_addr = u64::as_val_or_panic(*self.peek(0));
+                    let subclass_addr = LoxPtr::as_val_or_panic(*self.peek(0));
                     let subclass = self.heap_mut().deref_mut(subclass_addr).as_class_mut();
                     for (key, value) in superclass_methods.drain(..) {
                         subclass.methods.insert(key, value);

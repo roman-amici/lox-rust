@@ -340,7 +340,7 @@ impl Compiler {
         Ok(None)
     }
 
-    fn add_string(&mut self, s: String) -> u64 {
+    fn add_string(&mut self, s: String) -> LoxPtr {
         self.heap.add_to_heap(Object::String(s))
     }
 
@@ -664,7 +664,7 @@ impl Compiler {
         }
     }
 
-    fn parse_variable(&mut self, error_msg: &str) -> Result<u64, CompilerError> {
+    fn parse_variable(&mut self, error_msg: &str) -> Result<LoxPtr, CompilerError> {
         let token = self.try_consume(TokenType::Identifier, error_msg)?;
 
         if self.code_scope().depth > 0 {
@@ -688,7 +688,7 @@ impl Compiler {
         self.code_scope().locals.last_mut().unwrap().initialized = true;
     }
 
-    fn finish_define(&mut self, str_ptr: u64, line: usize) {
+    fn finish_define(&mut self, str_ptr: LoxPtr, line: usize) {
         if self.code_scope().depth == 0 {
             //Only define globals at scope depth
             let str_idx = self.chunk().add_constant(Value::Object(str_ptr));

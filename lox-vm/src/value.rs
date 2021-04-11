@@ -4,11 +4,13 @@ use std::collections::HashMap;
 use std::fmt;
 use std::fmt::{Display, Formatter};
 
+pub type LoxPtr = usize;
+
 #[derive(Debug, Copy, Clone)]
 pub enum Value {
     Number(f64),
     Boolean(bool),
-    Object(u64),
+    Object(LoxPtr), //index
     Nil,
 }
 
@@ -18,7 +20,9 @@ impl Display for Value {
             Value::Number(n) => write!(f, "{} : Number", n),
             Value::Boolean(b) => write!(f, "{} : Boolean", b),
             Value::Nil => write!(f, "nil : Nil"),
-            Value::Object(p) => write!(f, "{} : ObjectPtr", p),
+            Value::Object(ptr) => {
+                write!(f, "{} : ObjectPtr", ptr)
+            }
         }
     }
 }
@@ -26,6 +30,7 @@ impl Display for Value {
 //Consider changing to a struct
 #[derive(Clone)]
 pub enum Object {
+    Empty,
     String(String),
     Function(Function),
     NativeFunction(String, fn(Vec<Value>) -> Result<Value, InterpreterError>),
@@ -98,6 +103,7 @@ impl Object {
 impl Display for Object {
     fn fmt(&self, f: &mut Formatter<'_>) -> fmt::Result {
         match self {
+            Object::Empty => write!(f, "<Empty>"),
             Object::String(s) => write!(f, "{}", s),
             Object::Function(func) => write!(f, "{}", func.to_string()),
             Object::NativeFunction(name, _) => write!(f, "<Native {}>", name),
@@ -139,8 +145,8 @@ pub struct Function {
 
 #[derive(Clone)]
 pub struct Closure {
-    pub function_pointer: u64,
-    pub closed_values: Vec<u64>,
+    pub function_pointer: LoxPtr,
+    pub closed_values: Vec<LoxPtr>,
 }
 
 impl Function {
@@ -162,19 +168,19 @@ impl Function {
 #[derive(Clone)]
 pub struct Class {
     pub name: String,
-    pub methods: HashMap<String, u64>,
+    pub methods: HashMap<String, LoxPtr>,
 }
 
 #[derive(Clone)]
 pub struct Instance {
-    pub class_ptr: u64,
+    pub class_ptr: LoxPtr,
     pub fields: HashMap<String, Value>,
 }
 
 #[derive(Clone)]
 pub struct BoundMethod {
     pub receiver: Value,
-    pub closure_ptr: u64,
+    pub closure_ptr: LoxPtr,
 }
 
 pub trait FromValue
@@ -207,8 +213,8 @@ impl FromValue for f64 {
     }
 }
 
-impl FromValue for u64 {
-    fn as_val(val: Value, line: usize) -> Result<u64, InterpreterError> {
+impl FromValue for LoxPtr {
+    fn as_val(val: Value, line: usize) -> Result<LoxPtr, InterpreterError> {
         match val {
             Value::Object(ptr) => Ok(ptr),
             _ => Err(InterpreterError::TypeError(
@@ -217,7 +223,7 @@ impl FromValue for u64 {
             )),
         }
     }
-    fn as_val_or_panic(val: Value) -> u64 {
+    fn as_val_or_panic(val: Value) -> LoxPtr {
         match val {
             Value::Object(ptr) => ptr,
             _ => panic!("Expected an object"),
